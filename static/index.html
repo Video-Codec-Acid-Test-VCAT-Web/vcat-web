@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>VCAT Remote Monitor</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <link rel="icon" href="/static/favicon.png" type="image/x-icon">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js" defer></script>
+  <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@2.0.1/dist/chartjs-plugin-zoom.min.js" defer></script>
+
+  <script src="/static/main.js" defer></script>
+</head>
+<body>
+  <!-- Header (same as original) -->
+  <div class="header">
+    <img src="/static/VCAT_Logo_tnsp.png" alt="VCAT Logo" class="logo">
+    <div class="title-text">
+      <h1>VCAT</h1>
+      <p class="subtitle">Remote Monitor</p>
+    </div>
+  </div>
+
+  <div class="main-content" style="display: flex; gap: 40px; align-items: flex-start;">
+
+    <!-- 🔹 Left side: Fixed 500px panel -->
+    <div id="device-wrapper" style="font-family: sans-serif; width: 300px; min-width: 300px;">
+
+      <!-- Centered label block -->
+      <div style="text-align: left; margin-bottom: 6px;">
+        <label for="device" style="font-weight: bold;">Select device:</label>
+      </div>
+
+      <!-- Aligned row: dropdown and Connect button -->
+      <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 10px; padding-left: 8px;">
+        <select id="device">
+          <option disabled selected>Loading devices...</option>
+        </select>
+        <button id="connect-btn" onclick="handleConnectClick()">Connect</button>
+      </div>
+
+      <!-- Device summary and "..." button -->
+      <div style="margin-top: 12px; display: flex; align-items: center; padding-left: 8px;">
+        <strong id="device-summary">Device:</strong>
+        <button onclick="openDeviceModal(event)" style="
+          font-size: 14px;
+          padding: 2px 6px;
+          margin-left: 8px;
+          cursor: pointer;
+        ">...</button>
+      </div>
+    </div>
+
+    <!-- 🔹 Right side: Console block (unchanged from above) -->
+    <div id="console-section" style="flex-grow: 1; font-family: monospace;">
+      <div style="display: flex; align-items: center; justify-content: space-between;">
+        <h3 style="margin: 0;">Console</h3>
+      </div>
+
+      <div style="position: relative; margin-top: 4px;">
+        <pre id="console-preview" style="
+          background: #111;
+          color: #0f0;
+          padding: 10px;
+          height: 2.8em;
+          width: 100%;
+          min-width: 600px;
+          max-width: 100%;
+          overflow: hidden;
+          white-space: pre-wrap;
+          border: 1px solid #333;
+          font-family: monospace;
+          text-align: left;
+        "></pre>
+
+        <div style="
+          position: absolute;
+          top: 5px;
+          right: 10px;
+          display: flex;
+          gap: 6px;
+        ">
+          <button onclick="updateConsoleLog()" title="Refresh console" style="
+            font-size: 14px;
+            padding: 2px 6px;
+            cursor: pointer;
+          ">🔄</button>
+          <button onclick="openConsoleModal()" title="Expand console" style="
+            font-size: 16px;
+            padding: 2px 6px;
+            cursor: pointer;
+          ">∨</button>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+
+
+    <div id="console-modal" class="modal-overlay">
+        <div class="modal-content" id="console-modal-content" style="
+          background: #111;                          /* black terminal background */
+          padding: 0;                                /* no internal padding */
+          border-radius: 6px;
+          box-shadow: 0 0 12px rgba(0, 0, 0, 0.6);
+          border: 2px solid #ff8c1a;                /* ✅ orange border around the modal */
+          width: 600px;                             /* ✅ fixed width */
+          max-height: 75vh;
+          overflow: hidden;
+          position: absolute;
+          top: 200px;
+          left: 40px;
+        ">
+
+        <span class="modal-close" onclick="closeConsoleModal()">×</span>
+        <pre id="console-full" style="
+          white-space: pre-wrap;
+          background: #111;            /* 🖤 black console background */
+          color: #0f0;                 /* ✅ green text */
+          font-family: monospace;
+          font-size: 14px;
+          text-align: left;
+          margin: 0;
+          padding: 5px;
+          border-radius: 4px;
+          box-shadow: 0 0 12px rgba(0, 0, 0, 0.6);  /* 🟫 soft edge */
+          border: .5px solid rgba(255, 255, 255, 0.05); /* ultra-thin soft line */
+          max-height: 70vh;
+          overflow-y: auto;
+        ">
+        </pre>
+
+      </div>
+    </div>
+
+    <div class="dashboard-grid">
+
+      <!-- CPU Usage -->
+      <div class="chart-wrapper">
+        <h3>CPU Usage (%)</h3>
+        <canvas id="cpuChart"></canvas>
+      </div>
+
+      <!-- CPU Frequency -->
+      <div class="chart-wrapper">
+        <h3>CPU Frequency (MHz)</h3>
+        <canvas id="freqChart"></canvas>
+      </div>
+
+      <!-- Memory -->
+      <div class="chart-wrapper">
+        <h3>Memory Usage (MB)</h3>
+        <canvas id="memoryChart"></canvas>
+      </div>
+
+      <!-- Frame Drops -->
+      <div class="chart-wrapper">
+        <h3>Frame Drops</h3>
+        <canvas id="frameDropChart"></canvas>
+      </div>
+      
+      <!-- Battery Level -->
+      <div class="chart-wrapper">
+        <h3>Battery Level</h3>
+        <canvas id="batteryChart"></canvas>
+      </div>
+
+
+    </div>
+
+
+  
+  <div id="device-modal" class="modal-overlay">
+    <div class="modal-content" id="device-modal-content">
+      <span class="modal-close" onclick="closeDeviceModal()">×</span>
+      <div id="device-modal-body"></div>
+    </div>
+  </div>
+
+
+
+</body>
+</html>
+
