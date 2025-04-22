@@ -431,4 +431,98 @@ function chartOptions(yLabel, latestTime, stepSize) {
   };
 }
 
+const API_RUN_CONFIG = '/api/device/run_config';
+// Modal control for Run Config
+function openRunConfigModal() {
+    fetch(`${API_RUN_CONFIG}?session=${session_token}&device=${selectedDevice}`)
+
+    .then(res => res.json())
+    .then(config => {
+      const modal = document.getElementById("run-config-modal");
+      const modalBody = document.getElementById("run-config-body");
+
+      renderRunConfigUI(config);
+
+      // Position the modal below the gear icon (if exists)
+        
+      const btn = document.getElementById("run-config-btn");
+      const rect = btn?.getBoundingClientRect();
+      const modalContent = document.getElementById("run-config-modal-content");
+
+      if (rect && modalContent) {
+        modalContent.style.top = `${rect.bottom + window.scrollY + 10}px`;
+        modalContent.style.left = `${rect.left + window.scrollX}px`;
+      }
+
+      modal.style.display = "block";
+      setTimeout(() => {
+        document.addEventListener("click", handleRunConfigOutsideClick);
+      }, 0);
+    })
+    .catch(err => {
+      console.error("❌ Failed to fetch run config:", err);
+    });
+}
+
+function renderRunConfigUI(config) {
+  const container = document.getElementById("run-config-body");
+  container.innerHTML = ''; // Clear previous content
+
+  const section = document.createElement("div");
+  section.innerHTML = `
+    <h2 style="margin-top: 0;">Run Configuration</h2>
+
+    <label>Screen Brightness: <span id="brightness-value">${config.screenBrightness}</span>%</label>
+    <input type="range" min="0" max="100" value="${config.screenBrightness}" disabled 
+           oninput="document.getElementById('brightness-value').innerText = this.value" />
+
+    <label style="margin-top: 12px;">Threads:</label>
+    <select id="threads-select" disabled>
+      ${[1, 2, 3, 4].map(i => `<option ${i === config.threads ? 'selected' : ''}>${i}</option>`).join('')}
+    </select>
+
+    <fieldset style="margin-top: 12px;" disabled>
+      <legend>Run Mode:</legend>
+      ${["ONCE", "BATTERY", "TIME"].map(mode => `
+        <label>
+          <input type="radio" name="runMode" value="${mode}" ${config.runMode === mode ? 'checked' : ''} disabled>
+          ${mode}
+        </label>
+      `).join('<br>')}
+    </fieldset>
+
+    <label style="margin-top: 12px;">Run Limit:</label>
+    <input type="number" min="1" value="${config.runLimit}" style="width: 60px;" disabled />
+
+    <label style="margin-top: 12px;">
+      <input type="checkbox" ${config.showVlcControls ? 'checked' : ''} disabled>
+      Show VLC Controls
+    </label>
+
+    <h3 style="margin-top: 20px;">Decoder Configuration</h3>
+    <table style="width: 100%; border-collapse: collapse; margin-top: 8px;">
+      <thead><tr><th style="text-align:left;">MIME Type</th><th style="text-align:left;">Decoder</th></tr></thead>
+      <tbody>
+        ${Object.entries(config.decoderCfg.decoderConfig).map(([mime, decoder]) => `
+          <tr><td>${mime}</td><td>${decoder}</td></tr>
+        `).join('')}
+      </tbody>
+    </table>
+  `;
+  container.appendChild(section);
+}
+
+
+
+function closeRunConfigModal() {
+  document.getElementById("run-config-modal").style.display = "none";
+  document.removeEventListener("click", handleRunConfigOutsideClick);
+}
+
+function handleRunConfigOutsideClick(event) {
+  const modal = document.getElementById("run-config-modal-content");
+  if (!modal.contains(event.target)) {
+    closeRunConfigModal();
+  }
+}
 

@@ -547,6 +547,30 @@ def api_device_info():
     except requests.RequestException as e:
         return jsonify({"error": f"Failed to fetch device info: {str(e)}"}), 500
 
+@app.route("/api/device/run_config", methods=["GET"])
+def api_device_run_config():
+    session_id = request.args.get("session") or "<invalid token>"
+    if not isSessionValid(session_id):
+        return jsonify({"error": "Invalid or missing session_id"}), 400
+
+    device_id = request.args.get("device")
+    if not device_id:
+        return jsonify({"error": "Missing device_id"}), 400
+
+    ipAddr = get_device_ip_and_port(session_id, device_id)
+    if not ipAddr:
+        return jsonify({"error": "Could not determine IP or port"}), 404
+
+    try:
+        url = f"{ipAddr}/run_config"
+        response = requests.get(url, timeout=5)
+        response.raise_for_status()
+        return Response(
+            response.text, status=response.status_code, mimetype="application/json"
+        )
+    except requests.RequestException as e:
+        return jsonify({"error": f"Failed to fetch run config: {str(e)}"}), 500
+
 @app.route("/api/vcat_monitor/telemetry", methods=["GET"])
 def api_telemetry():
     session_id = request.args.get("session") or "<invalid token>"
