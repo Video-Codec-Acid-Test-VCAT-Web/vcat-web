@@ -1,14 +1,8 @@
-<table>
-<tr>
-<td><img src="static/VCAT_Logo_tnsp.png" width="100"></td>
-<td><h1>VCAT Web</h1></td>
-<td>Remote Monitor</td>
-</tr>
-</table>
+<img src="static/VCAT_Logo_tnsp.png" width="100" alt="VCAT Logo">
 
+ # VCAT Web Remote Monitor
 
-
-# Overview
+## Overview
 vcat_web provides web control of VCAT benchmark sessions using a combination of ADB and http.  It consists of vcat_telemetry.py, a python telemetry server which provided the connections to the device under test, and the web server index.html>
 vcat_web runs on python using flask.  See requirements.txt for setup details.
 ## To Run
