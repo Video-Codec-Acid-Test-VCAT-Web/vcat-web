@@ -4,11 +4,12 @@ import random
 import re
 import struct
 import subprocess
+import sys
 import threading
 import time
 import uuid
 from collections import OrderedDict
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field, is_dataclass
 from datetime import datetime
 from typing import Dict, List
 
@@ -16,6 +17,14 @@ import requests
 import vcat_http_proxy
 
 from flask import Flask, jsonify, request, Response, send_from_directory
+
+
+# fail gracefully if we don't have the right version of Python
+if sys.version_info < (3, 9):
+    print("❌ Python 3.9 or higher is required to run VCAT Telemetry.")
+    sys.exit(1)
+else:
+    print("✅ Python version is OK.")
 
 
 @dataclass
@@ -59,10 +68,32 @@ class CpuFreguencyEntry:
 
 
 @dataclass
+class CurrentTestVideo:
+    fileName: str = ""
+    startTime: str = ""
+    videoCodec: str = ""
+    videoDecoder: str = ""
+    resolution: str = ""
+    mimeType: str = ""
+    bitrate: str = ""
+    framerate: float = 0.0
+
+
+@dataclass
+class TestDetails:
+    testState: str = ""
+    startTime: str = ""
+    playlist: str = ""
+    currentTestVideo: CurrentTestVideo = field(default_factory=CurrentTestVideo)
+
+
+@dataclass
 class TelemetryData:
+    owner_session_id: str
     device_id: str
     device_ipaddr: str
     start_time: float
+    test_details: TestDetails
     battery_data: list[BatteryEntry]
     system_memory: list[MemoryEntry]
     app_memory: list[AppMemoryEntry]
@@ -290,7 +321,7 @@ def get_device_ip_and_port(session_id, device_id):
         log_output = result.stdout
 
         # Clear logcat to avoid stale data next time
-        subprocess.run(["adb", "-s", device_id, "logcat", "-c"])
+        # subprocess.run(["adb", "-s", device_id, "logcat", "-c"])
 
         # Parse logcat output
         match = re.search(r"HTTP server @ ((?:\d{1,3}\.){3}\d{1,3}):(\d+)", log_output)
@@ -299,6 +330,10 @@ def get_device_ip_and_port(session_id, device_id):
             log_console_entry(
                 session_id, f"[VCAT] {device_id} ip_addr: http://{ip_address}:{port}"
             )
+            log_console_entry(
+                session_id, f"[VCAT] {device_id} ip_addr: http://{ip_address}:{port}"
+            )
+            print(f"[VCAT] {device_id} ip_addr: http://{ip_address}:{port}")
             return f"http://{ip_address}:{port}"
 
         else:
@@ -367,8 +402,97 @@ def get_app_memory(device_id, package="org.videolan.vlc"):
     return None
 
 
+from flask import Response
+from vcat_http_proxy import get_device_http_response
+
+
+def get_frame_drops(session_id, device_id: str) -> list[FramedropEntry]:
+    if device_id not in telemetry_dataset:
+        print(f"[WARN] Unknown device: {device_id}")
+        return []
+
+    telemetry = telemetry_dataset[device_id]
+    last_time = (
+        telemetry.frame_drops[-1].elapsed_time if telemetry.frame_drops else -1.0
+    )
+
+    ipAddr = get_device_ip_and_port(session_id, device_id)
+    if not ipAddr:
+        print(f"[ERROR] Could not determine IP or port")
+        return []
+
+    # Call the telemetry endpoint
+    ip_addr = telemetry.device_ipaddr
+    response: Response = vcat_http_proxy.get_device_http_response(
+        device_id, ip_addr, "/api/telemetry/framedrops"
+    )
+
+    if not response or response.status_code != 200:
+        print(f"[ERROR] Failed to fetch frame drops for {device_id}")
+        return []
+
+    try:
+        json_data = response.get_json()
+        new_entries = []
+
+        for entry in json_data.get("framedrops", []):
+            elapsed = entry.get("elapsed_time")
+            drops = entry.get("framedrops")
+            if elapsed is not None and drops is not None and elapsed > last_time:
+                new_entries.append(
+                    FramedropEntry(elapsed_time=elapsed, delta_framedrops=drops)
+                )
+
+        return new_entries
+
+    except Exception as e:
+        print(f"[ERROR] Parsing frame drop data failed: {e}")
+        return []
+
+
 def get_framedrop_stats(device_id):
     return random.randint(0, 10)
+
+
+def get_test_details(session_id, device_id: str) -> TestDetails:
+
+    if device_id not in telemetry_dataset:
+        print(f"[WARN] Unknown device: {device_id}")
+        return TestDetails()
+
+    telemetry = telemetry_dataset[device_id]
+
+    # Call the telemetry endpoint
+    ip_addr = telemetry.device_ipaddr
+    response: Response = vcat_http_proxy.get_device_http_response(
+        device_id, ip_addr, "/api/test/status"
+    )
+
+    if not response or response.status_code != 200:
+        print(f"[ERROR] Failed to fetch test status for {device_id}")
+        return TestDetails()
+
+    try:
+        data = response.get_json()
+
+        return TestDetails(
+            playlist=data.get("playlist", ""),
+            startTime=data.get("startTime", ""),
+            testState=data.get("testState", "Unknown"),
+            currentTestVideo=CurrentTestVideo(
+                fileName=data["currentTestVideo"].get("fileName", ""),
+                startTime=data["currentTestVideo"].get("startTime", ""),
+                videoCodec=data["currentTestVideo"].get("videoCodec", ""),
+                videoDecoder=data["currentTestVideo"].get("videoDecoder", ""),
+                resolution=data["currentTestVideo"].get("resolution", ""),
+                mimeType=data["currentTestVideo"].get("mimeType", ""),
+                bitrate=data["currentTestVideo"].get("bitrate", ""),
+                framerate=data["currentTestVideo"].get("fps", 0.0),
+            ),
+        )
+    except Exception as e:
+        print(f"❌ Failed to parse test status: {e}")
+        return TestDetails()
 
 
 def telemetry_worker():
@@ -400,11 +524,20 @@ def telemetry_worker():
                     device_last_access.pop(device_id, None)
                 continue  # Skip to next device
 
+            test_details = get_test_details(telemetry_data.owner_session_id, device_id)
+            telemetry_data.test_details = test_details
+
+            if test_details.testState != "Running":
+                print(
+                    f"[Monitor] Device {device_id} is not running a test, skipping telemetry collection"
+                )
+                continue
+
             battery = get_battery_level(device_id)
             elapsed = time.time() - telemetry_data.start_time
             total_kb, used_kb = get_system_memory(device_id)
             app_kb = get_app_memory(device_id)
-            frame_drops = get_framedrop_stats(device_id)
+            frame_drops = get_frame_drops(telemetry_data.owner_session_id, device_id)
 
             if telemetry_data.cpu_usage:
                 prev_raw_data = telemetry_data.cpu_usage[-1].raw_stats
@@ -416,37 +549,38 @@ def telemetry_worker():
             cpu_freqs = get_cpu_frequencies(device_id)
 
             with monitor_thread_lock:
-                if battery is not None:
-                    telemetry_data.battery_data.append(
-                        BatteryEntry(elapsed_time=elapsed, battery_level=battery)
-                    )
+                if telemetry_data.start_time < 0:
+                    telemetry_data.start_time = time.time()
 
-                if total_kb is not None and used_kb is not None:
-                    telemetry_data.system_memory.append(
-                        MemoryEntry(
-                            elapsed_time=elapsed, total_kb=total_kb, used_kb=used_kb
-                        )
-                    )
+            telemetry_data.test_details = test_details
 
-                if app_kb is not None:
-                    telemetry_data.app_memory.append(
-                        AppMemoryEntry(elapsed_time=elapsed, app_kb=app_kb)
-                    )
+            if battery is not None:
+                telemetry_data.battery_data.append(
+                    BatteryEntry(elapsed_time=elapsed, battery_level=battery)
+                )
 
-                if frame_drops is not None:
-                    telemetry_data.frame_drops.append(
-                        FramedropEntry(
-                            elapsed_time=elapsed, delta_framedrops=frame_drops
-                        )
+            if total_kb is not None and used_kb is not None:
+                telemetry_data.system_memory.append(
+                    MemoryEntry(
+                        elapsed_time=elapsed, total_kb=total_kb, used_kb=used_kb
                     )
+                )
 
-                if cur_cpu_usage is not None:
-                    telemetry_data.cpu_usage.append(cur_cpu_usage)
+            if app_kb is not None:
+                telemetry_data.app_memory.append(
+                    AppMemoryEntry(elapsed_time=elapsed, app_kb=app_kb)
+                )
 
-                if cpu_freqs:
-                    telemetry_data.cpu_freq.append(
-                        CpuFreguencyEntry(elapsed_time=elapsed, frequencies=cpu_freqs)
-                    )
+            if frame_drops is not None:
+                telemetry_data.frame_drops.extend(frame_drops)
+
+            if cur_cpu_usage is not None:
+                telemetry_data.cpu_usage.append(cur_cpu_usage)
+
+            if cpu_freqs:
+                telemetry_data.cpu_freq.append(
+                    CpuFreguencyEntry(elapsed_time=elapsed, frequencies=cpu_freqs)
+                )
 
         time.sleep(5)
 
@@ -512,6 +646,23 @@ def session_console_log():
     return Response(
         json.dumps(ordered, indent=2, sort_keys=False), mimetype="application/json"
     )
+
+
+@app.route("/api/reset_session_console_log", methods=["POST"])
+def api_reset_session_console_log():
+    session_id = request.args.get("session")
+
+    if not session_id:
+        return jsonify({"error": "Missing session_id"}), 400
+
+    now = time.time()
+
+    with session_thread_lock:
+        session_console_logs[session_id] = SessionConsoleLog(
+            last_access=now, history=[]
+        )
+
+    return jsonify({"status": "console log reset completed"}), 200
 
 
 ##########################################
@@ -606,7 +757,7 @@ def api_device_stop():
     if not ipAddr:
         return jsonify({"error": "Could not determine IP or port"}), 404
 
-    return vcat_http_proxy.post_device_http_response(
+    return vcat_http_proxy.get_device_http_response(
         device_id, ipAddr, "/api/control/stop"
     )
 
@@ -625,7 +776,7 @@ def api_device_show_stats():
     if not ipAddr:
         return jsonify({"error": "Could not determine IP or port"}), 404
 
-    return vcat_http_proxy.post_device_http_response(
+    return vcat_http_proxy.get_device_http_response(
         device_id, ipAddr, "/api/control/show_stats"
     )
 
@@ -641,7 +792,7 @@ def api_device_playpause():
     if not ipAddr:
         return jsonify({"error": "Could not determine IP or port"}), 404
 
-    return vcat_http_proxy.post_device_http_response(
+    return vcat_http_proxy.get_device_http_response(
         device_id, ipAddr, "/api/control/playpause"
     )
 
@@ -664,6 +815,12 @@ def api_telemetry():
 
         if not telemetry:
             return jsonify({"error": "Device not being monitored"}), 404
+
+        if telemetry.start_time < 0:
+            return jsonify({"message": "Telemetry not avaiable yet."}), 202
+
+        # Test detqails
+        test_details = asdict(telemetry.test_details)
 
         # Battery records
         battery = [
@@ -715,6 +872,7 @@ def api_telemetry():
         response = {
             "timestamp": datetime.now().isoformat(),
             "device_id": device_id,
+            "test_details": test_details,
             "telemetry_data": {
                 "battery": battery,
                 "system_memory": system_memory,
@@ -750,18 +908,21 @@ def api_start_device_monitor():
     ip_port = get_device_ip_and_port(session_id, device_id)
     if not ip_port:
         return jsonify({"error": "Invalid device or unable to resolve IP/port"}), 400
-
+    time.sleep(0.5)
     with monitor_thread_lock:
         telemetry_dataset[device_id] = TelemetryData(
+            owner_session_id=session_id,
             device_id=device_id,
             device_ipaddr=ip_port,
             start_time=time.time(),
+            test_details=TestDetails(),
             battery_data=[],
             system_memory=[],
             app_memory=[],
             frame_drops=[],
             cpu_freq=[],
         )
+
         device_last_access[device_id] = time.time()
 
         if monitor_thread is None or not monitor_thread.is_alive():
@@ -828,6 +989,40 @@ def api_cpu():
             "cpu_stats": cpu_stats,
         }
     )
+
+
+@app.route("/api/vcat_monitor/reset", methods=["POST"])
+def api_vcat_monitor_reset():
+    session_id = request.args.get("session") or "<invalid token>"
+    if not isSessionValid(session_id):
+        return jsonify({"error": "Invalid or missing session_id"}), 400
+
+    device_id = request.args.get("device")
+    if not device_id:
+        return jsonify({"error": "Missing device_id"}), 400
+
+    now = time.time()
+
+    # ✅ Reset telemetry for the given device
+    with monitor_thread_lock:
+        telemetry_dataset[device_id] = TelemetryData(
+            owner_session_id=session_id,
+            device_id=device_id,
+            device_ipaddr="",
+            start_time=-1,
+            test_details=TestDetails(),
+            battery_data=[],
+            system_memory=[],
+            app_memory=[],
+            frame_drops=[],
+            cpu_freq=[],
+            cpu_usage=[],
+        )
+
+    # ✅ Log the telemetry reset event
+    log_console_entry(session_id, f"[VCAT] Telemetry reset for device {device_id}")
+
+    return jsonify({"status": "telemetry reset completed"}), 200
 
 
 ##########################################

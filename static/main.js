@@ -132,10 +132,6 @@ function updateConsoleLog() {
       const lastEntry = data.log.at(-1).text.trim();
       const fullLog = data.log.map(entry => entry.text.trim()).join('\n\n');
 
-
-      // Update preview with just the last line
-      document.getElementById("console-preview").textContent = lastEntry;
-
       // Update full modal view
       document.getElementById("console-full").textContent = fullLog;
     })
@@ -214,23 +210,63 @@ function closeDeviceModal() {
   document.removeEventListener("click", handleOutsideClick);
 }
 
-function openConsoleModal() {
+function openConsoleModal(event) {
   const modal = document.getElementById("console-modal");
-  const modalContent = document.getElementById("console-modal-content");
-  const btn = event.target;
+  if (!modal) {
+    console.error("❌ console-modal not found");
+    return;
+  }
+    
+    // Toggle: if visible, hide it
+    if (modal.style.display === "block") {
+      closeConsoleModal();
+      return;
+    }
 
-  // Align modal near the main preview box
-  const preview = document.getElementById("console-preview");
-  const rect = preview.getBoundingClientRect();
-  modalContent.style.top = `${rect.top + window.scrollY + 10}px`;
-  modalContent.style.left = `${rect.left + window.scrollX}px`;
+  const btn = document.getElementById("console-btn");
+  const rect = btn?.getBoundingClientRect();
+    
+    // Get center of the screen
+      const screenCenterX = window.innerWidth / 2;
 
-  modal.style.display = "block";
+    // Align left edge to center
+    const modalWidth = 600; // Set same as your CSS
+    modal.style.top = "200px";
+    modal.style.left = `${screenCenterX}px`;
+  
+    modal.style.display = "block";
 
-  setTimeout(() => {
-    document.addEventListener("click", handleConsoleOutsideClick);
-  }, 0);
+    setTimeout(() => {
+        document.addEventListener("click", handleConsoleOutsideClick);
+    }, 0);
 }
+
+
+(function makeConsoleDraggable() {
+  const modal = document.getElementById("console-modal");
+  const header = document.getElementById("console-modal-header");
+  let offsetX = 0, offsetY = 0, isDragging = false;
+
+  header.addEventListener("mousedown", (e) => {
+    isDragging = true;
+    offsetX = e.clientX - modal.offsetLeft;
+    offsetY = e.clientY - modal.offsetTop;
+    document.body.style.userSelect = "none";
+  });
+
+  document.addEventListener("mousemove", (e) => {
+    if (isDragging) {
+      modal.style.left = `${e.clientX - offsetX}px`;
+      modal.style.top = `${e.clientY - offsetY}px`;
+    }
+  });
+
+  document.addEventListener("mouseup", () => {
+    isDragging = false;
+    document.body.style.userSelect = "";
+  });
+})();
+
 
 
 function handleConsoleOutsideClick(event) {
@@ -379,16 +415,36 @@ function updateFrameDropChart(telemetry) {
   );
 }
 
+// Optional: Format ISO 8601 string to human-readable (e.g., "04/24/25 16:16:41")
+function formatDate(iso) {
+  if (!iso) return "";
+  const date = new Date(iso);
+  return date.toLocaleString(undefined, {
+    year: "2-digit", month: "2-digit", day: "2-digit",
+    hour: "2-digit", minute: "2-digit", second: "2-digit"
+  });
+}
+
+
 function fetchAndUpdateTelemetry() {
     fetch(`${API_TELEMETRY}?session=${session_token}&device=${selectedDevice}`)
     .then(res => res.json())
     .then(result => {
+
       const telemetry = result.telemetry_data;
+      const testDetails = result.test_details;
+        
+      if (testDetails) {
+          updateTestDetailsUI({ test_details: testDetails });
+          if(testDetails.testState != "Running")
+              return;
+      }
       updateBatteryChart(telemetry);
       updateCpuChart(telemetry);
       updateFreqChart(telemetry);
       updateMemoryChart(telemetry);
       updateFrameDropChart(telemetry);
+
     })
     .catch(err => console.error('❌ Telemetry fetch failed:', err));
 }
@@ -525,4 +581,42 @@ function handleRunConfigOutsideClick(event) {
     closeRunConfigModal();
   }
 }
+
+function updateTestDetailsUI(data) {
+    const details = data.test_details;
+    const curVideo = details.currentTestVideo;
+    // Top-level test info
+    document.getElementById("test-state").value = details.testState || "";
+    document.getElementById("test-start-time").value = details.startTime || "";
+    document.getElementById("test-playlist").value = details.playlist || "";
+
+    if (curVideo) {
+        // Current Test Video section
+        document.getElementById("current-start-time").value = curVideo.startTime || "";
+        document.getElementById("test-file").value = curVideo.fileName || "";
+        document.getElementById("test-codec").value = curVideo.videoCodec || "";
+        document.getElementById("test-decoder").value = curVideo.videoDecoder || "";
+        document.getElementById("test-resolution").value = curVideo.resolution || "";
+        document.getElementById("test-mimetype").value = curVideo.mimeType || "";
+        document.getElementById("test-bitrate").value = curVideo.bitrate || "";
+        document.getElementById("test-framerate").value =
+            (curVideo.framerate !== undefined) ? curVideo.framerate.toFixed(1) : "";
+    }
+
+}
+
+
+
+function sendControlCommand(cmd) {
+  const url = `${API_BASE}/api/device/${cmd}?session=${session_token}&device=${selectedDevice}`;
+  fetch(url, { method: 'POST' })
+    .then(res => {
+      if (!res.ok) throw new Error(`${cmd} failed`);
+      console.log(`✅ ${cmd} sent successfully`);
+    })
+    .catch(err => {
+      console.error(`❌ ${cmd} error:`, err);
+    });
+}
+
 

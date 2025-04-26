@@ -4,14 +4,15 @@ body {
     padding: 0;
     background: linear-gradient(135deg, #FFA500, #FF6600);
     color: #fff;
+    position: relative;
 }
 
 .header {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    padding: 30px 20px 10px 20px;
-    gap: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;  /* 👈 aligns the logo/title to the right */
+  padding: 0 20px;
+  gap: 20px;
 }
 
 .logo {
@@ -33,7 +34,6 @@ body {
 
 .main-content {
     padding: 20px;
-    max-width: 1000px;
     margin: 0 auto;
     text-align: center;
 }
@@ -77,13 +77,6 @@ body {
 }
 
 .chart-container {
-    background: white;
-    border-radius: 12px;
-    box-shadow: 0 4px 12px rgba(0,0,0,0.1);
-    color: black;
-}
-
-.chart-container {
     max-width: 800px;
     background: white;
     border-radius: 12px;
@@ -110,6 +103,77 @@ body {
     box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
 }
 
+/* In style.css */
+#console-modal {
+  position: absolute;
+  top: 100px;
+  left: 100px;
+  width: 600px;
+  background: #111;
+  border: 2px solid #ff8c1a;
+  color: #0f0;
+  font-family: monospace;
+  z-index: 9999;
+  border-radius: 6px;
+  box-shadow: 0 0 12px rgba(0, 0, 0, 0.6);
+}
+
+#console-full {
+  max-height: 300px;
+  overflow-y: auto;
+  padding: 10px;
+  margin: 0;
+}
+
+
+#console-modal-content {
+  position: absolute;
+  background: #111;
+  padding: 0;
+  border-radius: 6px;
+  box-shadow: 0 0 12px rgba(0, 0, 0, 0.6);
+  border: 2px solid #ff8c1a;
+  width: 600px;
+  max-height: 75vh;
+  overflow: hidden;
+  pointer-events: auto; /* So clicks still work inside modal */
+}
+
+.console-float {
+  position: absolute;
+  background: #111;
+  color: #0f0;
+  border: 2px solid #ff8c1a;
+  border-radius: 8px;
+  box-shadow: 0 0 12px rgba(0, 0, 0, 0.6);
+  width: 600px;
+  max-height: 75vh;
+  overflow: hidden;
+  z-index: 1000;
+}
+
+.modal-header {
+  padding: 8px 12px;
+  font-weight: bold;
+  background: #222;
+  border-bottom: 1px solid #ff8c1a;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  cursor: move;
+}
+
+.console-body {
+  padding: 10px;
+  font-family: monospace;
+  font-size: 14px;
+  overflow-y: auto;
+  max-height: 70vh;
+  white-space: pre-wrap;
+}
+
+
+
 .console-scroll {
     max-height: 200px; /* reduce from 300px */
     overflow-y: auto;
@@ -123,20 +187,53 @@ body {
     margin-bottom: 0;
 }
 
-.dashboard-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
-  max-width: 1260px; /* 3 × 400px with gap */
-  margin: 0 auto;
-  gap: 24px;
-}
-
 .chart-wrapper {
   background: #222;
   padding: 12px;
   border-radius: 10px;
   box-shadow: 0 0 8px rgba(0,0,0,0.4);
-  height: 350px; /* 👈 Adjust height here as needed (e.g., 350px or 400px) */
+  height: 350px;
+  width: 100%; /* ⬅️ ensure full width */
+}
+
+.console-float {
+  position: absolute;
+  top: 200px;
+  left: 40px;
+  width: 600px;
+  background: #111;
+  color: #0f0;
+  border: 2px solid #ff8c1a;
+  border-radius: 6px;
+  box-shadow: 0 0 12px rgba(0, 0, 0, 0.6);
+  z-index: 9999;
+  cursor: default;
+}
+
+.console-body {
+  margin: 0;
+  padding: 5px;
+  font-family: monospace;
+  font-size: 14px;
+  white-space: pre-wrap;
+  max-height: 70vh;
+  overflow-y: auto;
+  background: #111;
+  color: #0f0;
+  border-radius: 4px;
+  border: 0.5px solid rgba(255, 255, 255, 0.05);
+}
+
+.modal-header {
+  background: #222;
+  color: white;
+  padding: 6px 10px;
+  cursor: move;
+  font-weight: bold;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  border-bottom: 1px solid #555;
 }
 
 
@@ -174,4 +271,153 @@ body {
   cursor: pointer;
   color: white;
 }
+
+.dashboard-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
+  gap: 32px;               /* ⬅️ increases spacing between charts */
+  padding: 0 40px;         /* ⬅️ left/right margin */
+  width: 100%;
+  box-sizing: border-box;
+}
+
+
+
+canvas {
+  width: 100% !important;
+  height: auto !important;
+}
+
+fieldset.current-test-video label,
+fieldset.current-test-video input {
+  font-size: 12px;
+}
+
+.test-details-top label,
+.test-details-top input {
+  font-size: 12px;
+}
+
+.current-test-video {
+  margin-top: 12px;
+  border: 1px solid #888;
+  padding: 12px 16px;
+  border-radius: 8px;
+  color: white;
+}
+
+.current-test-video legend {
+  font-weight: bold;
+  font-size: 12px;
+  padding: 0 8px;
+}
+
+.test-video-grid {
+  display: flex;
+  gap: 40px; /* spacing between left and right columns */
+}
+
+.test-video-column {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+}
+
+/* Common row styling */
+.test-video-row {
+  display: flex;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+/* Left Column */
+.left-column label {
+  width: 50px; /* ⬅️ shorter label width for left side */
+  text-align: left;
+  margin-right: 8px;
+  font-size: 12px;
+}
+
+.left-column input {
+  flex: 1;
+  background: black;
+  color: white;
+  border: none;
+
+  font-size: 12px;
+  width: 220px;
+}
+
+/* Right Column */
+.right-column label {
+  width: 60px; /* ⬅️ longer label width for right side */
+  text-align: left;
+  margin-right: 2px;
+  font-size: 12px;
+}
+
+.right-column input {
+  flex: 0.8; /* slightly smaller input for right side */
+  background: black;
+  color: white;
+  border: none;
+  padding: 4px 8px;
+  font-size: 12px;
+  width: 40px;
+}
+
+/* Shared base styles */
+.test-video-grid {
+    display: flex;
+    gap: 8px; /* gap between columns */
+}
+
+.test-video-column {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 6px; /* gap between rows */
+}
+
+.test-video-row {
+    display: flex;
+    align-items: center;
+    gap: 4px; /* label-input gap */
+}
+
+/* Left column specific */
+.left-column .test-video-row label {
+    width: 40px; /* narrower label */
+    text-align: left;
+}
+
+.left-column .test-video-row input {
+    flex: 1;
+    min-width: 0; /* allow shrinking if needed */
+    background: black;
+    color: white;
+    border: none;
+    font-size: 12px; /* optional: consistent sizing */
+}
+
+/* Right column specific */
+.right-column .test-video-row label {
+    width: 70px; /* wider label */
+    text-align: left;
+    font-size: 12px;
+}
+
+.right-column .test-video-row input {
+    flex: 1;
+    min-width: 0;
+    background: black;
+    color: white;
+    border: none;
+    font-size: 12px;
+}
+
+
+
+
+
 
