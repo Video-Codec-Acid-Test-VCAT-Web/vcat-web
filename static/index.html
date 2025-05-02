@@ -31,6 +31,11 @@
                     style="width: 40px; height: 40px; cursor: pointer;" title="Run Config"/>
                <img alt="Console" id="console-btn" onclick="openConsoleModal()" src="/static/btn_console.png"
                     style="width: 40px; height: 40px; cursor: pointer;" title="Open Console"/>
+               <img alt="Console" id="reset-telemetry-btn" onclick="openResetModal()" src="/static/btn_reset_telemetry.png"
+                    style="width: 40px; height: 40px; cursor: pointer;" title="Reset Telemetry"/>
+               <img alt="Console" id="wireless-adb" onclick="openWirelessModal()" src="/static/btn_wireless_adb.png"
+                    style="width: 40px; height: 40px; cursor: pointer;" title="ADB Wireless Debugging"/>
+
              </div>
 
              <div style="margin-top: 12px; display: flex; align-items: center; padding-left: 8px;">
@@ -266,6 +271,33 @@
         <pre id="console-full" class="console-body">
         </pre>
       </div>
+      
+      <div id="reset-modal" class="modal-overlay">
+        <div class="modal-content" style="background: #222; color: white; padding: 20px; border: 2px solid #ff8c1a; border-radius: 8px;">
+          <h3>Confirm Reset</h3>
+          <p>Are you sure you want to reset telemetry?</p>
+          <div style="margin-top: 20px; text-align: right;">
+            <button onclick="confirmResetTelemetry()" style="background: #ff6600; color: white; padding: 8px 16px; border: none; border-radius: 6px; margin-right: 10px;">Yes</button>
+            <button onclick="closeResetModal()" style="padding: 8px 16px; border: none; border-radius: 6px;">Cancel</button>
+          </div>
+        </div>
+      </div>
+      
+      <div id="wireless-modal" class="modal-overlay">
+        <div class="modal-content" style="max-width: 400px;">
+          <h3>Switch to Wireless Debugging?</h3>
+          <p>
+            Switching to wireless debugging will reset all telemetry.<br>
+            Are you sure you want to continue?
+          </p>
+          <div style="text-align: right; margin-top: 20px;">
+            <button onclick="confirmWirelessAdb()" style="margin-right: 10px;">Yes</button>
+            <button onclick="closeWirelessModal()">Cancel</button>
+          </div>
+        </div>
+      </div>
+
+
    </body>
 </html>
 

@@ -29,7 +29,7 @@ function populateDeviceDropdown() {
           opt.textContent = device;
           select.appendChild(opt);
         });
-          
+
           setTimeout(updateConsoleLog, 500);
       })
       .catch(err => {
@@ -216,7 +216,7 @@ function openConsoleModal(event) {
     console.error("❌ console-modal not found");
     return;
   }
-    
+
     // Toggle: if visible, hide it
     if (modal.style.display === "block") {
       closeConsoleModal();
@@ -225,7 +225,7 @@ function openConsoleModal(event) {
 
   const btn = document.getElementById("console-btn");
   const rect = btn?.getBoundingClientRect();
-    
+
     // Get center of the screen
       const screenCenterX = window.innerWidth / 2;
 
@@ -233,7 +233,7 @@ function openConsoleModal(event) {
     const modalWidth = 600; // Set same as your CSS
     modal.style.top = "200px";
     modal.style.left = `${screenCenterX}px`;
-  
+
     modal.style.display = "block";
 
     setTimeout(() => {
@@ -433,7 +433,7 @@ function fetchAndUpdateTelemetry() {
 
       const telemetry = result.telemetry_data;
       const testDetails = result.test_details;
-        
+
       if (testDetails) {
           updateTestDetailsUI({ test_details: testDetails });
           if(testDetails.testState != "Running")
@@ -500,7 +500,7 @@ function openRunConfigModal() {
       renderRunConfigUI(config);
 
       // Position the modal below the gear icon (if exists)
-        
+
       const btn = document.getElementById("run-config-btn");
       const rect = btn?.getBoundingClientRect();
       const modalContent = document.getElementById("run-config-modal-content");
@@ -529,7 +529,7 @@ function renderRunConfigUI(config) {
     <h2 style="margin-top: 0;">Run Configuration</h2>
 
     <label>Screen Brightness: <span id="brightness-value">${config.screenBrightness}</span>%</label>
-    <input type="range" min="0" max="100" value="${config.screenBrightness}" disabled 
+    <input type="range" min="0" max="100" value="${config.screenBrightness}" disabled
            oninput="document.getElementById('brightness-value').innerText = this.value" />
 
     <label style="margin-top: 12px;">Threads:</label>
@@ -619,4 +619,90 @@ function sendControlCommand(cmd) {
     });
 }
 
+function openResetModal() {
+  document.getElementById("reset-modal").style.display = "block";
+}
 
+function closeResetModal() {
+  document.getElementById("reset-modal").style.display = "none";
+}
+
+function confirmResetTelemetry() {
+  resetTelemetry();
+  closeResetModal();
+}
+
+function resetTelemetry() {
+    if (!session_token || !selectedDevice) {
+    console.error("❌ Session or device not selected!");
+    return;
+    }
+
+    // Clear existing chart data immediately
+    if (batteryChart) {
+      batteryChart.data.labels = [];
+      batteryChart.data.datasets.forEach(ds => ds.data = []);
+      batteryChart.update();
+    }
+    if (cpuChart) {
+      cpuChart.data.labels = [];
+      cpuChart.data.datasets.forEach(ds => ds.data = []);
+      cpuChart.update();
+    }
+    if (freqChart) {
+      freqChart.data.labels = [];
+      freqChart.data.datasets.forEach(ds => ds.data = []);
+      freqChart.update();
+    }
+    if (memoryChart) {
+      memoryChart.data.labels = [];
+      memoryChart.data.datasets.forEach(ds => ds.data = []);
+      memoryChart.update();
+    }
+    if (frameDropChart) {
+      frameDropChart.data.labels = [];
+      frameDropChart.data.datasets.forEach(ds => ds.data = []);
+      frameDropChart.update();
+    }
+
+    fetch(`/api/vcat_monitor/reset?session=${session_token}&device=${selectedDevice}`, { method: "POST" })
+    .then(res => {
+      if (res.ok) {
+        console.log("✅ Telemetry reset successfully");
+        // maybe reload telemetry graphs? Up to you
+      } else {
+        console.error("❌ Telemetry reset failed");
+      }
+    })
+    .catch(err => {
+      console.error("❌ Error resetting telemetry:", err);
+    });
+}
+
+function openWirelessModal() {
+  document.getElementById("wireless-modal").style.display = "block";
+}
+
+function closeWirelessModal() {
+  document.getElementById("wireless-modal").style.display = "none";
+}
+
+function confirmWirelessAdb() {
+  closeWirelessModal();
+
+  if (!session_token || !selectedDevice) {
+    alert("No device selected.");
+    return;
+  }
+
+  fetch(`/api/wireless_adb?session=${session_token}&device=${selectedDevice}`)
+    .then(res => res.json())
+    .then(data => {
+      alert(data.message || data.error);
+      setTimeout(() => location.reload(), 1000);  // Give 1s for clarity
+    })
+    .catch(err => {
+      console.error("❌ Wireless ADB setup failed:", err);
+      alert("Wireless ADB setup failed.");
+    });
+}
