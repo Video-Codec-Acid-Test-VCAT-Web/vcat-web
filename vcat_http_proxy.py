@@ -3,6 +3,7 @@ import re
 import subprocess
 from enum import Enum
 from typing import Optional
+import vcat_adb
 
 import requests
 from flask import Response
@@ -23,7 +24,7 @@ def setRouting(method: RoutingMethod):
     _current_routing_method = method
 
 
-def http_get_via_adb(device_id: str, ipAddr: str, path: str) -> Response:
+def http_get_via_adb(session_id: str, device_id: str, ipAddr: str, path: str) -> Response:
     try:
         port_match = re.search(r":(\d+)", ipAddr)
         port = port_match.group(1) if port_match else "5302"
@@ -33,9 +34,13 @@ def http_get_via_adb(device_id: str, ipAddr: str, path: str) -> Response:
 
         cmd = f"echo -e 'GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n' | nc 127.0.0.1 {port}"
         full_cmd = ["adb", "-s", device_id, "shell", cmd]
-        result = subprocess.run(full_cmd, capture_output=True, text=True, timeout=5)
 
-        body_match = re.search(r"\r?\n\r?\n(.*)", result.stdout, re.DOTALL)
+        output = vcat_adb.run_adb_command_with_log(session_id, device_id, full_cmd)
+
+        if output is None:
+            return Response("No response from ADB command", status=500)
+
+        body_match = re.search(r"\r?\n\r?\n(.*)", output, re.DOTALL)
         if not body_match:
             return Response("No valid body found in ADB response", status=500)
 
@@ -59,9 +64,9 @@ def http_get_via_network(ipAddr: str, path: str) -> Response:
         return Response(f"Network GET failed: {str(e)}", status=500)
 
 
-def get_device_http_response(device_id: str, ipAddr: str, path: str) -> Response:
+def get_device_http_response(session_id, device_id: str, ipAddr: str, path: str) -> Response:
     if _current_routing_method == RoutingMethod.ADB:
-        return http_get_via_adb(device_id, ipAddr, path)
+        return http_get_via_adb(session_id, device_id, ipAddr, path)
     else:
         return http_get_via_network(ipAddr, path)
 
@@ -93,10 +98,10 @@ def http_post_via_adb(
         return Response(f"ADB POST failed: {str(e)}", status=500)
 
 
-def http_post_via_network(ipAddr: str, path: str, json_data: dict) -> Response:
+def http_post_via_network(ipAddr: str, path: str, json_payload: Optional[dict] = None) -> Response:
     try:
         url = f"{ipAddr.rstrip('/')}/{path.lstrip('/')}"
-        response = requests.post(url, json=json_data, timeout=5)
+        response = requests.post(url, json=json_payload, timeout=5)
 
         return Response(
             response.text,

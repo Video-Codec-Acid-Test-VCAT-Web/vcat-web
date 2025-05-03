@@ -1,7 +1,7 @@
 import argparse
 import json
+import os
 import random
-import re
 import struct
 import subprocess
 import sys
@@ -11,17 +11,36 @@ import uuid
 from collections import OrderedDict
 from dataclasses import asdict, dataclass, field, is_dataclass
 from datetime import datetime
-from typing import Dict, List
+from typing import Dict, List, Optional, Tuple
 from urllib.parse import urlparse
+
 import requests
+import vcat_adb
 import vcat_http_proxy
 
-from flask import Flask, jsonify, request, Response, send_from_directory
-import os
+from flask import Flask, jsonify, make_response, request, Response, send_from_directory
+from vcat_telemetry_data_models import (
+    AppMemoryEntry,
+    BatteryEntry,
+    CpuFreguencyEntry,
+    CpuUsageEntry,
+    CurrentTestVideo,
+    DeviceInfo,
+    FramedropEntry,
+    LRUCache,
+    MemoryEntry,
+    parse_device_info,
+    TelemetryData,
+    TestDetails,
+)
+from vcat_telemetry_writer import (
+    append_telemetry,
+    create_telemetry_excel,
+    TelemetrySheet,
+)
 
 # Create logs directory if it doesn't exist
 os.makedirs("logs", exist_ok=True)
-
 
 
 # fail gracefully if we don't have the right version of Python
@@ -32,106 +51,13 @@ else:
     print("✅ Python version is OK.")
 
 
-@dataclass
-class BatteryEntry:
-    elapsed_time: float
-    battery_level: float
-
-
-@dataclass
-class FramedropEntry:
-    elapsed_time: float
-    delta_framedrops: int
-
-
-@dataclass
-class MemoryEntry:
-    elapsed_time: float
-    total_kb: int
-    used_kb: int
-
-
-@dataclass
-class AppMemoryEntry:
-    elapsed_time: float
-    app_kb: int
-
-
-@dataclass
-class CpuUsageEntry:
-    elapsed_time: float
-    usage_pct: Dict[str, float]
-    raw_stats: Dict[
-        str, List[int]
-    ]  # e.g., {"cpu": [...], "cpu0": [...], "cpu1": [...]}
-
-
-@dataclass
-class CpuFreguencyEntry:
-    elapsed_time: float
-    frequencies: Dict[str, int]
-
-
-@dataclass
-class CurrentTestVideo:
-    fileName: str = ""
-    startTime: str = ""
-    videoCodec: str = ""
-    videoDecoder: str = ""
-    resolution: str = ""
-    mimeType: str = ""
-    bitrate: str = ""
-    framerate: float = 0.0
-
-
-@dataclass
-class TestDetails:
-    testState: str = ""
-    startTime: str = ""
-    playlist: str = ""
-    currentTestVideo: CurrentTestVideo = field(default_factory=CurrentTestVideo)
-
-
-@dataclass
-class TelemetryData:
-    owner_session_id: str
-    device_id: str
-    device_ipaddr: str
-    start_time: float
-    test_details: TestDetails
-    battery_data: list[BatteryEntry]
-    system_memory: list[MemoryEntry]
-    app_memory: list[AppMemoryEntry]
-    frame_drops: list[FramedropEntry]
-    cpu_freq: List[CpuFreguencyEntry]
-    cpu_usage: List[CpuUsageEntry] = field(default_factory=list)
-
-
 telemetry_dataset = OrderedDict()
-device_last_access: OrderedDict[str, float] = OrderedDict()
+session_last_access: OrderedDict[str, float] = OrderedDict()
+session_last_poll: OrderedDict[str, float] = OrderedDict()
 
-
-@dataclass
-class SessionConsoleLogEntry:
-    time: float  # Unix timestamp (for pruning)
-    date: str  # Human-readable timestamp string (e.g., '23:45:01')
-    text: str  # Full command + output block, with embedded \n
-
-
-@dataclass
-class SessionConsoleLog:
-    last_access: float
-    history: List[SessionConsoleLogEntry] = field(default_factory=list)
-
-
-session_console_logs: Dict[str, SessionConsoleLog] = OrderedDict()
-session_thread_lock = threading.Lock()
+session_thread_lock = threading.RLock()
 
 MAX_CONSOLE_LINES = 500
-
-monitor_thread = None
-monitor_thread_lock = threading.Lock()
-
 
 app = Flask(__name__, static_folder="static")
 
@@ -141,116 +67,13 @@ def serve_index():
     return send_from_directory("static", "index.html")
 
 
-BROADCAST_COMMANDS = {
-    "log_http_port": "org.videolan.vlcbenchmark.ADB_LOG_HTTP_INFO",
-}
-
-
-def touch_session(session_id: str):
+def touch_session_access(session_id: str, device_id: str):
     with session_thread_lock:
-        session = session_console_logs.get(session_id)
-        if session:
-            session.last_access = time.time()
-
-def touchConsole(session_id: str):
-    with monitor_thread_lock:
-        console = session_console_logs.get(session_id)
-        if console:
-            console.last_access = time.time()
+        session_last_access[device_id] = time.time()
 
 
-def log_console_entry(session_id: str, text: str):
-    now = time.time()
-    timestamp = datetime.now().strftime("%H:%M:%S")
-
-    entry = SessionConsoleLogEntry(time=now, date=timestamp, text=text)
-
-    if session_id not in session_console_logs:
-        session_console_logs[session_id] = SessionConsoleLog(last_access=now)
-
-    log = session_console_logs[session_id]
-    log.history.append(entry)
-    touchConsole(session_id)
-
-    if len(log.history) > MAX_CONSOLE_LINES:
-        log.history = log.history[-MAX_CONSOLE_LINES:]
-
-
-def run_adb_command_with_log(
-    session_id: str, device_id: str, cmd: List[str], log_level: str = "info"
-):
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
-        output = result.stdout.strip()
-        error = result.stderr.strip() if result.stderr else ""
-
-        if log_level != "debug" and session_id in session_console_logs:
-            log_text = f"$ {' '.join(cmd)}\n"
-            if output:
-                log_text += f"[OUT] {output}\n"
-            if error:
-                log_text += f"[ERR] {error}"
-            log_console_entry(session_id, log_text)
-
-        return output
-
-    except subprocess.CalledProcessError as e:
-        error_msg = e.stderr.strip() if e.stderr else str(e)
-        if log_level != "debug" or session_id in session_console_logs:
-            log_console_entry(session_id, f"$ {' '.join(cmd)}\n[ERR] {error_msg}")
-        return None
-
-
-def get_adb_devices(session_id, log_level: str = "info"):
-    cmd = ["adb", "devices"]
-
-    # device_id is not needed for this command, so pass an empty string
-    stdout = run_adb_command_with_log(
-        session_id=session_id, device_id="", cmd=cmd, log_level=log_level
-    )
-
-    if stdout is None:
-        return []
-
-    lines = stdout.strip().splitlines()[1:]  # Skip the "List of devices attached" line
-    return [line.split()[0] for line in lines if "device" in line]
-
-
-def is_valid_device(session_id, device_id):
-    return device_id in get_adb_devices(session_id)
-
-def send_adb_broadcast(session_id, device_id, command_key, extras=None):
-    if not is_valid_device(session_id, device_id):
-        print("[ERROR] Invalid device.")
-        return
-
-    if command_key not in BROADCAST_COMMANDS:
-        print(f"[ERROR] Unknown broadcast command: {command_key}")
-        return
-
-    base_cmd = [
-        "adb",
-        "-s",
-        device_id,
-        "shell",
-        "am",
-        "broadcast",
-        "-a",
-        BROADCAST_COMMANDS[command_key],
-    ]
-
-    if extras:
-        for key, value in extras.items():
-            base_cmd += ["--es", key, value]
-
-    output = run_adb_command_with_log(session_id, device_id, base_cmd, log_level="info")
-
-    if output is not None:
-        print(f"[Broadcast '{command_key}' sent]")
-        print(output)
-    else:
-        print(f"[Broadcast '{command_key}' failed']")
-
+def touch_session_poll(session_id: str):
+    session_last_poll[session_id] = time.time()
 
 
 def get_cpu_stats(device_id, elapsed_time, prev_raw_data: Dict[str, List[int]]):
@@ -298,131 +121,6 @@ def get_cpu_stats(device_id, elapsed_time, prev_raw_data: Dict[str, List[int]]):
         return None
 
 
-def get_cpu_frequencies(device_id):
-    try:
-        result = subprocess.run(
-            [
-                "adb",
-                "-s",
-                device_id,
-                "shell",
-                "cat /sys/devices/system/cpu/cpu*/cpufreq/scaling_cur_freq",
-            ],
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-        freqs = result.stdout.strip().splitlines()
-        freq_dict = {
-            f"core{i}": int(freq) // 1000 for i, freq in enumerate(freqs)
-        }  # Convert to MHz
-        return freq_dict
-    except Exception as e:
-        print(f"[get_cpu_frequencies ERROR] {e}")
-        return {}
-
-ipCache: OrderedDict[str, str] = OrderedDict()
-
-def get_device_ip_and_port(session_id, device_id):
-    
-    if device_id in ipCache:
-        return ipCache[device_id]
-
-    send_adb_broadcast(session_id, device_id, "log_http_port")
-
-    try:
-        # Grab logcat for just the VCAT tag
-        logcat_cmd = ["adb", "-s", device_id, "logcat", "-d", "-s", "VCAT"]
-        result = subprocess.run(logcat_cmd, capture_output=True, text=True, check=True)
-        log_output = result.stdout
-
-        # Clear logcat to avoid stale data next time
-        # subprocess.run(["adb", "-s", device_id, "logcat", "-c"])
-
-        # Parse logcat output
-        match = re.search(r"HTTP server @ ((?:\d{1,3}\.){3}\d{1,3}):(\d+)", log_output)
-        if match:
-            ip_address, port = match.group(1), int(match.group(2))
-            log_console_entry(
-                session_id, f"[VCAT] {device_id} ip_addr: http://{ip_address}:{port}"
-            )
-            log_console_entry(
-                session_id, f"[VCAT] {device_id} ip_addr: http://{ip_address}:{port}"
-            )
-            print(f"[VCAT] {device_id} ip_addr: http://{ip_address}:{port}")
-            ipCache[device_id] = f"http://{ip_address}:{port}"
-            return f"http://{ip_address}:{port}"
-
-        else:
-            log_console_entry(
-                session_id, "[VCAT] ERROR: Could not find HTTP server line in logcat"
-            )
-            return None
-
-    except Exception as e:
-        log_console_entry(
-            session_id, f"[VCAT] Exception during IP/port retrieval: {str(e)}"
-        )
-        return None
-
-
-def get_battery_level(device_id):
-    try:
-        result = subprocess.run(
-            ["adb", "-s", device_id, "shell", "dumpsys", "battery"],
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-        for line in result.stdout.splitlines():
-            if "level:" in line:
-                return int(line.strip().split(":")[1].strip())
-    except Exception as e:
-        print(f"[Battery Error] {e}")
-    return None
-
-
-def get_system_memory(device_id):
-    result = subprocess.run(
-        ["adb", "-s", device_id, "shell", "cat /proc/meminfo"],
-        capture_output=True,
-        text=True,
-    )
-    meminfo = {}
-    for line in result.stdout.splitlines():
-        if ":" in line:
-            key, val = line.split(":", 1)
-            meminfo[key.strip()] = int(val.strip().split()[0])  # value in kB
-    mem_total = meminfo.get("MemTotal", 0)
-    mem_available = meminfo.get("MemAvailable", 0)
-    mem_used = mem_total - mem_available
-    return mem_total, mem_used
-
-
-def get_app_memory(device_id, package="org.videolan.vlc"):
-    try:
-        result = subprocess.run(
-            ["adb", "-s", device_id, "shell", "dumpsys", "meminfo", package],
-            capture_output=True,
-            text=True,
-            check=True,
-            timeout=5,
-        )
-        for line in result.stdout.splitlines():
-            line = line.strip()
-            if line.startswith("TOTAL"):
-                parts = line.split()
-                if len(parts) >= 2 and parts[1].isdigit():
-                    return int(parts[1])  # PSS in KB
-    except Exception as e:
-        print(f"[get_app_memory ERROR] {e}")
-    return None
-
-
-from flask import Response
-from vcat_http_proxy import get_device_http_response
-
-
 def get_frame_drops(session_id, device_id: str) -> list[FramedropEntry]:
     if device_id not in telemetry_dataset:
         print(f"[WARN] Unknown device: {device_id}")
@@ -442,7 +140,7 @@ def get_frame_drops(session_id, device_id: str) -> list[FramedropEntry]:
     # Call the telemetry endpoint
     ip_addr = telemetry.device_ipaddr
     response: Response = vcat_http_proxy.get_device_http_response(
-        device_id, ip_addr, "/api/telemetry/framedrops"
+        session_id, device_id, ip_addr, "/api/telemetry/framedrops"
     )
 
     if not response or response.status_code != 200:
@@ -483,7 +181,7 @@ def get_test_details(session_id, device_id: str) -> TestDetails:
     # Call the telemetry endpoint
     ip_addr = telemetry.device_ipaddr
     response: Response = vcat_http_proxy.get_device_http_response(
-        device_id, ip_addr, "/api/test/status"
+        session_id, device_id, ip_addr, "/api/test/status"
     )
 
     if not response or response.status_code != 200:
@@ -534,14 +232,15 @@ def telemetry_worker():
             iteration_start_time = time.time()
 
             elapsed = time.time() - telemetry_data.start_time
-            last_poll = device_last_access.get(device_id, 0)
+            last_poll = session_last_poll.get(device_id, 0)
 
             if elapsed > 10 * 60 and iteration_start_time - last_poll < 10 * 60:
                 continue  # Skip polling this device for now
 
+            touch_session_poll(telemetry_data.owner_session_id)
 
             # is current connection stale?
-            last_access = device_last_access.get(device_id, 0)
+            last_access = session_last_access.get(device_id, 0)
             time_since_access = time.time() - last_access
 
             if time_since_access > MAX_ACCESS_SPAN:
@@ -550,7 +249,7 @@ def telemetry_worker():
                 )
                 with session_thread_lock:
                     telemetry_dataset.pop(device_id, None)
-                    device_last_access.pop(device_id, None)
+                    session_last_access.pop(device_id, None)
                 continue  # Skip to next device
 
             test_details = get_test_details(telemetry_data.owner_session_id, device_id)
@@ -562,10 +261,10 @@ def telemetry_worker():
                 )
                 continue
 
-            battery = get_battery_level(device_id)
+            battery = vcat_adb.get_battery_level(device_id)
             elapsed = time.time() - telemetry_data.start_time
-            total_kb, used_kb = get_system_memory(device_id)
-            app_kb = get_app_memory(device_id)
+            total_kb, used_kb = vcat_adb.get_system_memory(device_id)
+            app_kb = vcat_adb.get_app_memory(device_id)
             frame_drops = get_frame_drops(telemetry_data.owner_session_id, device_id)
 
             if telemetry_data.cpu_usage:
@@ -575,14 +274,16 @@ def telemetry_worker():
 
             cur_cpu_usage = get_cpu_stats(device_id, elapsed, prev_raw_data)
 
-            cpu_freqs = get_cpu_frequencies(device_id)
+            cpu_freqs = vcat_adb.get_cpu_frequencies(device_id)
 
             with session_thread_lock:
                 if telemetry_data.start_time < 0:
                     telemetry_data.start_time = time.time()
 
                 if iteration_start_time < telemetry_data.start_time:
-                    print(f"[Monitor] Skipping stale telemetry for {device_id} (collected before reset)")
+                    print(
+                        f"[Monitor] Skipping stale telemetry for {device_id} (collected before reset)"
+                    )
                     continue  # skip applying this iteration's data
 
                 telemetry_data.test_details = test_details
@@ -592,40 +293,88 @@ def telemetry_worker():
                         BatteryEntry(elapsed_time=elapsed, battery_level=battery)
                     )
 
-                if total_kb is not None and used_kb is not None:
+                    row = [
+                        [
+                            telemetry_data.battery_data[-1].elapsed_time,
+                            telemetry_data.battery_data[-1].battery_level,
+                        ]
+                    ]
+                    append_telemetry(
+                        device_id,
+                        TelemetrySheet.BATTERY,
+                        row,
+                    )
+
+                if total_kb is not None and used_kb is not None and app_kb is not None:
                     telemetry_data.system_memory.append(
                         MemoryEntry(
                             elapsed_time=elapsed, total_kb=total_kb, used_kb=used_kb
                         )
                     )
 
-                if app_kb is not None:
                     telemetry_data.app_memory.append(
                         AppMemoryEntry(elapsed_time=elapsed, app_kb=app_kb)
                     )
 
+                    mem_entry = telemetry_data.system_memory[-1]
+                    app_entry = telemetry_data.app_memory[-1]
+
+                    row = [
+                        mem_entry.elapsed_time,
+                        mem_entry.total_kb,
+                        mem_entry.used_kb,
+                        app_entry.app_kb,
+                    ]
+                    append_telemetry(device_id, TelemetrySheet.MEMORY, [row])
+
                 if frame_drops is not None:
                     telemetry_data.frame_drops.extend(frame_drops)
+                    rows = [
+                        [entry.elapsed_time, entry.delta_framedrops]
+                        for entry in frame_drops
+                    ]
+                    append_telemetry(
+                        device_id,
+                        TelemetrySheet.FRAME_DROPS,
+                        rows,
+                    )
 
                 if cur_cpu_usage is not None:
                     telemetry_data.cpu_usage.append(cur_cpu_usage)
+
+                    usage_row = [cur_cpu_usage.elapsed_time]
+
+                    # Build row in consistent order: total first, then sorted cores
+                    usage_row.append(
+                        cur_cpu_usage.usage_pct.get("cpu", 0.0)
+                    )  # 'cpu' is the total key
+
+                    core_keys = sorted(
+                        k
+                        for k in cur_cpu_usage.usage_pct
+                        if k.startswith("cpu") and k != "cpu"
+                    )
+
+                    usage_row.extend(
+                        [cur_cpu_usage.usage_pct.get(k, 0.0) for k in core_keys]
+                    )
+
+                    append_telemetry(device_id, TelemetrySheet.CPU_USAGE, [usage_row])
 
                 if cpu_freqs:
                     telemetry_data.cpu_freq.append(
                         CpuFreguencyEntry(elapsed_time=elapsed, frequencies=cpu_freqs)
                     )
 
-    
+                    freq_row = [elapsed]
+
+                    # Use sorted keys for consistent column order
+                    core_keys = sorted(cpu_freqs.keys())
+                    freq_row.extend([cpu_freqs[k] for k in core_keys])
+
+                    append_telemetry(device_id, TelemetrySheet.CPU_FREQ, [freq_row])
+
         time.sleep(30)
-
-
-def isSessionValid(session_id: str) -> bool:
-    with session_thread_lock:
-        session = session_console_logs.get(session_id)
-        if session:
-            session.last_access = time.time()
-            return True
-        return False
 
 
 MAX_SESSION_ACCESS_SPAN = 30 * 60  # 30 minutes
@@ -637,17 +386,17 @@ def session_cleanup_loop():
         with session_thread_lock:
             expired = [
                 sid
-                for sid, log in session_console_logs.items()
+                for sid, log in vcat_adb.session_consoles.items()
                 if now - log.last_access > MAX_SESSION_ACCESS_SPAN
             ]
             for sid in expired:
                 print(f"[Session Cleanup] Expiring session {sid}")
-                del session_console_logs[sid]
+                del vcat_adb.session_consoles[sid]
         time.sleep(60)
 
 
 def resetTelemetry(session_id, device_id):
-    ipAddr = get_device_ip_and_port(session_id, device_id) or ""
+    ipAddr = vcat_adb.get_device_ip_and_port(session_id, device_id) or ""
 
     now = time.time()
 
@@ -657,6 +406,7 @@ def resetTelemetry(session_id, device_id):
             owner_session_id=session_id,
             device_id=device_id,
             device_ipaddr=ipAddr,
+            device_info=DeviceInfo(),
             start_time=time.time(),
             test_details=TestDetails(),
             battery_data=[],
@@ -667,33 +417,38 @@ def resetTelemetry(session_id, device_id):
             cpu_usage=[],
         )
 
-        response = vcat_http_proxy.get_device_http_response(device_id, ipAddr, "/api/telemetry/reset_framedrops")
+        response = vcat_http_proxy.get_device_http_response(
+            session_id, device_id, ipAddr, "/api/telemetry/reset_framedrops"
+        )
 
         if not response or response.status_code != 200:
-            print(f"[{device_id}] Failed to reset frame drops (HTTP {response.status_code if response else 'No Response'})")
+            print(
+                f"[{device_id}] Failed to reset frame drops (HTTP {response.status_code if response else 'No Response'})"
+            )
         else:
             print(f"[{device_id}] Frame drops reset successfully")
 
-    
     # ✅ Log the telemetry reset event
-    log_console_entry(session_id, f"[VCAT] Telemetry reset for device {device_id}")
+    vcat_adb.log_console_entry(
+        session_id, f"[VCAT] Telemetry reset for device {device_id}"
+    )
 
 
 @app.route("/api/session_token", methods=["GET"])
 def session_token():
     token = str(uuid.uuid4())
-    session_console_logs[token] = SessionConsoleLog(last_access=time.time())
+    vcat_adb.session_consoles[token] = vcat_adb.SessionConsole(last_access=time.time())
     return jsonify({"session_token": token})
 
 
 @app.route("/api/session_console_log", methods=["GET"])
 def session_console_log():
     session_id = request.args.get("session") or "<invalid token>"
-    if not isSessionValid(session_id):
+    if not vcat_adb.isSessionValid(session_id):
         return jsonify({"error": "Invalid or missing session_id"}), 400
 
-    log_data = session_console_logs.get(session_id)
-    touchConsole(session_id)
+    log_data = vcat_adb.session_consoles.get(session_id)
+    vcat_adb.touchConsole(session_id)
 
     if not log_data:
         return jsonify({"error": "Invalid or missing session_id"}), 400
@@ -723,14 +478,8 @@ def api_reset_session_console_log():
     if not session_id:
         return jsonify({"error": "Missing session_id"}), 400
 
-    now = time.time()
+    vcat_adb.reset_session_console(session_id)
 
-    with session_thread_lock:
-        session_console_logs[session_id] = SessionConsoleLog(
-            last_access=now, history=[]
-        )
-
-    touchConsole(session_id)
     return jsonify({"status": "console log reset completed"}), 200
 
 
@@ -742,73 +491,111 @@ def api_reset_session_console_log():
 @app.route("/api/all_connected_devices", methods=["GET"])
 def api_devices():
     session_id = request.args.get("session") or "<invalid token>"
-    if not isSessionValid(session_id):
+    if not vcat_adb.isSessionValid(session_id):
         return jsonify({"error": "Invalid or missing session_id"}), 400
 
-    touchConsole(session_id)
-    return jsonify(get_adb_devices(session_id))
+    vcat_adb.touchConsole(session_id)
+    return jsonify(vcat_adb.get_adb_devices(session_id))
 
 
 @app.route("/api/device/address_of", methods=["GET"])
 def api_ip_port():
     session_id = request.args.get("session") or "<invalid token>"
-    if not isSessionValid(session_id):
+    if not vcat_adb.isSessionValid(session_id):
         return jsonify({"error": "Invalid or missing session_id"}), 400
 
-    touchConsole(session_id)
+    vcat_adb.touchConsole(session_id)
 
     device_id = request.args.get("device")
-    if not device_id or not is_valid_device(session_id, device_id):
+    if not device_id or not vcat_adb.is_valid_device(session_id, device_id):
         return jsonify({"error": "Invalid or missing device ID"}), 400
 
-    info = get_device_ip_and_port(session_id, device_id)
+    info = vcat_adb.get_device_ip_and_port(session_id, device_id)
     if info:
         return jsonify({"address": info})
     return jsonify({"error": "Could not determine IP or port"}), 404
 
 
+device_info_cache: LRUCache[str, DeviceInfo] = LRUCache(10)
+
+
+def get_device_info(
+    session_id: str, device_id: str
+) -> Tuple[Optional[DeviceInfo], Optional[Response]]:
+    if device_id in device_info_cache:
+        return device_info_cache[device_id], None
+
+    ipAddr = vcat_adb.get_device_ip_and_port(session_id, device_id)
+    if not ipAddr:
+        return None, make_response(
+            jsonify({"error": "Could not determine IP or port"}), 404
+        )
+
+    try:
+        response = vcat_http_proxy.get_device_http_response(
+            session_id, device_id, ipAddr, "/api/device_info"
+        )
+
+        if response is None or response.status_code != 200:
+            return None, response
+
+        data = response.get_json(force=True)
+        if data is None:
+            resp = jsonify({"error": "Device info response body is empty"})
+            resp.status_code = 500
+            return None, resp
+
+        device_info = parse_device_info(data)
+        device_info_cache[device_id] = device_info
+        return device_info, None
+
+    except requests.RequestException as e:
+        return None, make_response(
+            jsonify({"error": f"Failed to fetch device info: {e}"}), 500
+        )
+
+
 @app.route("/api/device/info", methods=["GET"])
 def api_device_info():
     session_id = request.args.get("session") or "<invalid token>"
-    if not isSessionValid(session_id):
+    if not vcat_adb.isSessionValid(session_id):
         return jsonify({"error": "Invalid or missing session_id"}), 400
-    touchConsole(session_id)
+    vcat_adb.touchConsole(session_id)
 
     device_id = request.args.get("device")
     if not device_id:
         return jsonify({"error": "Missing device_id"}), 400
 
-    ipAddr = get_device_ip_and_port(session_id, device_id)
-    if not ipAddr:
-        return jsonify({"error": "Could not determine IP or port"}), 404
+    device_info, error_response = get_device_info(session_id, device_id)
+    if error_response:
+        return error_response
 
-    try:
-        response = vcat_http_proxy.get_device_http_response(
-            device_id, ipAddr, "/api/device_info"
-        )
-        return response
-    except requests.RequestException as e:
-        return jsonify({"error": f"Failed to fetch device info: {str(e)}"}), 500
+    if device_info is None:
+        return make_response(jsonify({"error": "Missing device info"}), 500)
+
+    return jsonify(
+        device_info.to_dict()
+    )  # You may need to import `asdict` from `dataclasses`
 
 
 @app.route("/api/device/run_config", methods=["GET"])
 def api_device_run_config():
     session_id = request.args.get("session") or "<invalid token>"
-    if not isSessionValid(session_id):
+    if not vcat_adb.isSessionValid(session_id):
         return jsonify({"error": "Invalid or missing session_id"}), 400
 
-    touchConsole(session_id)
+    vcat_adb.touchConsole(session_id)
     device_id = request.args.get("device")
     if not device_id:
         return jsonify({"error": "Missing device_id"}), 400
 
-    ipAddr = get_device_ip_and_port(session_id, device_id)
+    ipAddr = vcat_adb.get_device_ip_and_port(session_id, device_id)
     if not ipAddr:
         return jsonify({"error": "Could not determine IP or port"}), 404
 
     try:
         response = vcat_http_proxy.get_device_http_response(
-            device_id, ipAddr, "/api/run_config"
+            session_id, device_id, ipAddr, "/api/run_config"
         )
 
         return response
@@ -820,40 +607,40 @@ def api_device_run_config():
 @app.route("/api/device/stop", methods=["POST"])
 def api_device_stop():
     session_id = request.args.get("session") or "<invalid token>"
-    if not isSessionValid(session_id):
+    if not vcat_adb.isSessionValid(session_id):
         return jsonify({"error": "Invalid or missing session_id"}), 400
-    touchConsole(session_id)
+    vcat_adb.touchConsole(session_id)
 
     device_id = request.args.get("device")
     if not session_id or not device_id:
         return jsonify({"error": "Missing session or device ID"}), 400
 
-    ipAddr = get_device_ip_and_port(session_id, device_id)
+    ipAddr = vcat_adb.get_device_ip_and_port(session_id, device_id)
     if not ipAddr:
         return jsonify({"error": "Could not determine IP or port"}), 404
 
     return vcat_http_proxy.get_device_http_response(
-        device_id, ipAddr, "/api/control/stop"
+        session_id, device_id, ipAddr, "/api/control/stop"
     )
 
 
 @app.route("/api/device/show_stats", methods=["POST"])
 def api_device_show_stats():
     session_id = request.args.get("session") or "<invalid token>"
-    if not isSessionValid(session_id):
+    if not vcat_adb.isSessionValid(session_id):
         return jsonify({"error": "Invalid or missing session_id"}), 400
-    touchConsole(session_id)
+    vcat_adb.touchConsole(session_id)
 
     device_id = request.args.get("device")
     if not session_id or not device_id:
         return jsonify({"error": "Missing session or device ID"}), 400
 
-    ipAddr = get_device_ip_and_port(session_id, device_id)
+    ipAddr = vcat_adb.get_device_ip_and_port(session_id, device_id)
     if not ipAddr:
         return jsonify({"error": "Could not determine IP or port"}), 404
 
     return vcat_http_proxy.get_device_http_response(
-        device_id, ipAddr, "/api/control/show_stats"
+        session_id, device_id, ipAddr, "/api/control/show_stats"
     )
 
 
@@ -864,41 +651,44 @@ def api_device_playpause():
     if not session_id or not device_id:
         return jsonify({"error": "Missing session or device ID"}), 400
 
-    touchConsole(session_id)
-    ipAddr = get_device_ip_and_port(session_id, device_id)
+    vcat_adb.touchConsole(session_id)
+    ipAddr = vcat_adb.get_device_ip_and_port(session_id, device_id)
     if not ipAddr:
         return jsonify({"error": "Could not determine IP or port"}), 404
 
     return vcat_http_proxy.get_device_http_response(
-        device_id, ipAddr, "/api/control/playpause"
+        session_id, device_id, ipAddr, "/api/control/playpause"
     )
 
-@app.route('/api/wireless_adb')
+
+@app.route("/api/wireless_adb")
 def api_enable_wireless_adb():
-    session_id = request.args.get('session')
-    device_id = request.args.get('device')
+    session_id = request.args.get("session")
+    device_id = request.args.get("device")
 
     if not session_id or not device_id:
         return jsonify({"error": "Missing session or device"}), 400
 
-    if not is_valid_device(session_id, device_id):
+    if not vcat_adb.is_valid_device(session_id, device_id):
         return jsonify({"error": "Invalid device"}), 404
-    touchConsole(session_id)
+    vcat_adb.touchConsole(session_id)
 
     try:
         # Step 1: Enable wireless ADB
-        output = run_adb_command_with_log(
+        output = vcat_adb.run_adb_command_with_log(
             session_id,
             device_id,
             ["adb", "-s", device_id, "tcpip", "5555"],
-            log_level="info"
+            log_level="info",
         )
 
         if output is None:
             return jsonify({"error": "Failed to enable wireless ADB"}), 500
 
         # Step 2: Find device IP address
-        device_ip_url = get_device_ip_and_port(session_id, device_id)  # ⚡ You already have this function
+        device_ip_url = vcat_adb.get_device_ip_and_port(
+            session_id, device_id
+        )  # ⚡ You already have this function
         if not device_ip_url:
             return jsonify({"error": "Could not get device IP address"}), 500
 
@@ -906,11 +696,11 @@ def api_enable_wireless_adb():
         ip_addr = parsed_url.hostname
 
         # Step 3: Connect wirelessly
-        connect_output = run_adb_command_with_log(
+        connect_output = vcat_adb.run_adb_command_with_log(
             session_id,
             device_id,
             ["adb", "connect", f"{ip_addr}:5555"],
-            log_level="info"
+            log_level="info",
         )
 
         if connect_output is None:
@@ -918,7 +708,12 @@ def api_enable_wireless_adb():
 
         resetTelemetry(session_id, device_id)
 
-        return jsonify({"message": f"Wireless ADB enabled and connected to {ip_addr}:5555"}), 200
+        return (
+            jsonify(
+                {"message": f"Wireless ADB enabled and connected to {ip_addr}:5555"}
+            ),
+            200,
+        )
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -930,14 +725,14 @@ def api_enable_wireless_adb():
 @app.route("/api/vcat_monitor/telemetry", methods=["GET"])
 def api_telemetry():
     session_id = request.args.get("session") or "<invalid token>"
-    if not isSessionValid(session_id):
+    if not vcat_adb.isSessionValid(session_id):
         return jsonify({"error": "Invalid or missing session_id"}), 400
 
     device_id = request.args.get("device")
     if not device_id:
         return jsonify({"error": "Missing device_id"}), 400
 
-    touch_session(session_id)
+    touch_session_access(session_id, device_id)
 
     with session_thread_lock:
         telemetry = telemetry_dataset.get(device_id)
@@ -1012,8 +807,8 @@ def api_telemetry():
             },
         }
 
-        device_last_access[device_id] = time.time()
-        touchConsole(session_id)
+        touch_session_access(session_id, device_id)
+        vcat_adb.touchConsole(session_id)
 
         return Response(
             json.dumps(response, indent=2, sort_keys=False), mimetype="application/json"
@@ -1023,12 +818,12 @@ def api_telemetry():
 @app.route("/api/vcat_monitor/start", methods=["POST"])
 def api_start_device_monitor():
     session_id = request.args.get("session") or "<invalid token>"
-    if session_console_logs.get(session_id) is None:
+    if not vcat_adb.isSessionValid(session_id):
         return jsonify({"error": "Invalid or missing session_id"}), 400
 
-    touchConsole(session_id)
+    vcat_adb.touchConsole(session_id)
 
-    global monitor_thread
+    global console_thread
     device_id = request.args.get("device")
 
     if not device_id:
@@ -1037,15 +832,23 @@ def api_start_device_monitor():
     if device_id in telemetry_dataset:
         return jsonify({"status": "already_monitored"}), 200
 
-    ip_port = get_device_ip_and_port(session_id, device_id)
+    device_info, error_response = get_device_info(session_id, device_id)
+    if error_response:
+        return error_response
+
+    if device_info is None:
+        return make_response(jsonify({"error": "Missing device info"}), 500)
+
+    ip_port = vcat_adb.get_device_ip_and_port(session_id, device_id)
     if not ip_port:
         return jsonify({"error": "Invalid device or unable to resolve IP/port"}), 400
     time.sleep(0.5)
     with session_thread_lock:
-        telemetry_dataset[device_id] = TelemetryData(
+        telemetry_data = TelemetryData(
             owner_session_id=session_id,
             device_id=device_id,
             device_ipaddr=ip_port,
+            device_info=device_info,
             start_time=time.time(),
             test_details=TestDetails(),
             battery_data=[],
@@ -1055,11 +858,16 @@ def api_start_device_monitor():
             cpu_freq=[],
         )
 
-        device_last_access[device_id] = time.time()
+        telemetry_dataset[device_id] = telemetry_data
+        session_last_access[device_id] = time.time()
 
-        if monitor_thread is None or not monitor_thread.is_alive():
-            monitor_thread = threading.Thread(target=telemetry_worker, daemon=True)
-            monitor_thread.start()
+        create_telemetry_excel(telemetry_data)
+
+        if vcat_adb.console_thread is None or not vcat_adb.console_thread.is_alive():
+            vcat_adb.console_thread = threading.Thread(
+                target=telemetry_worker, daemon=True
+            )
+            vcat_adb.console_thread.start()
 
     return jsonify({"status": "monitoring_started", "device_id": device_id}), 200
 
@@ -1067,10 +875,10 @@ def api_start_device_monitor():
 @app.route("/api/vcat_monitor/stop", methods=["POST"])
 def api_stop_device_monitor():
     session_id = request.args.get("session") or "<invalid token>"
-    if not isSessionValid(session_id):
+    if not vcat_adb.isSessionValid(session_id):
         return jsonify({"error": "Invalid or missing session_id"}), 400
 
-    touchConsole(session_id)
+    vcat_adb.touchConsole(session_id)
 
     device_id = request.args.get("device")
     if not device_id:
@@ -1081,17 +889,17 @@ def api_stop_device_monitor():
 
     with session_thread_lock:
         telemetry_dataset.pop(device_id, None)
-        device_last_access.pop(device_id, None)
+        session_last_access.pop(device_id, None)
     return jsonify({"status": "monitoring_stopped", "device_id": device_id}), 200
 
 
 @app.route("/api/vcat_monitor/monitored_devices", methods=["GET"])
 def api_monitored_devices():
     session_id = request.args.get("session") or "<invalid token>"
-    if not isSessionValid(session_id):
+    if not vcat_adb.isSessionValid(session_id):
         return jsonify({"error": "Invalid or missing session_id"}), 400
 
-    touchConsole(session_id)
+    vcat_adb.touchConsole(session_id)
 
     with session_thread_lock:
         devices = [
@@ -1104,23 +912,23 @@ def api_monitored_devices():
 @app.route("/api/vcat_monitor/raw_cpu", methods=["GET"])
 def api_cpu():
     session_id = request.args.get("session") or "<invalid token>"
-    if not isSessionValid(session_id):
+    if not vcat_adb.isSessionValid(session_id):
         return jsonify({"error": "Invalid or missing session_id"}), 400
 
-    touchConsole(session_id)
+    vcat_adb.touchConsole(session_id)
 
     device_id = request.args.get("device")
-    if not device_id or not is_valid_device(session_id, device_id):
+    if not device_id or not vcat_adb.is_valid_device(session_id, device_id):
         return jsonify({"error": "Invalid or missing device ID"}), 400
 
     if not device_id in telemetry_dataset:
         return jsonify({"error": "not_monitoring", "device_id": device_id}), 400
 
-    touch_session(session_id)
+    touch_session_access(session_id, device_id)
 
     cpu_stats = {}
 
-    with monitor_thread_lock:
+    with session_thread_lock:
         cpu_stats = telemetry_dataset[device_id].cpu_usage
 
     return jsonify(
@@ -1130,13 +938,14 @@ def api_cpu():
         }
     )
 
+
 @app.route("/api/vcat_monitor/reset", methods=["POST"])
 def api_vcat_monitor_reset():
     session_id = request.args.get("session") or "<invalid token>"
-    if not isSessionValid(session_id):
+    if not vcat_adb.isSessionValid(session_id):
         return jsonify({"error": "Invalid or missing session_id"}), 400
 
-    touchConsole(session_id)
+    vcat_adb.touchConsole(session_id)
     device_id = request.args.get("device")
     if not device_id:
         return jsonify({"error": "Missing device_id"}), 400

@@ -8,8 +8,9 @@ vcat_web runs on python using flask.  See requirements.txt for setup details.
 ## To Run
 
 1. Install VLC and VCAT on Android devices to be tested
-2. Connect one or more Android devices to USB and ensure that they all have USB debugging enabled.
-3. Launch vcat_telemetry.py
-4. vcat_telemetry.py will default to port 5050.  From Browser, go to localhost:5050
-5. Select a device and connect.
-6. Start a VCAT benchmark on the connected device
+2. Ensure that the following Python packages are installed: flask, openpyxl, requests
+3. Connect one or more Android devices to USB and ensure that they all have USB debugging enabled.
+4. Launch vcat_telemetry.py
+5. vcat_telemetry.py will default to port 5050.  From Browser, go to localhost:5050
+6. Select a device and connect.
+7. Start a VCAT benchmark on the connected device
