@@ -232,9 +232,10 @@ def telemetry_worker():
             iteration_start_time = time.time()
 
             elapsed = time.time() - telemetry_data.start_time
-            last_poll = session_last_poll.get(device_id, 0)
+            last_poll = session_last_poll.get(telemetry_data.owner_session_id, 0)
+            time_since_last_poll = iteration_start_time - last_poll
 
-            if elapsed > 10 * 60 and iteration_start_time - last_poll < 10 * 60:
+            if elapsed > 10 * 60 and time_since_last_poll < 10 * 60:
                 continue  # Skip polling this device for now
 
             touch_session_poll(telemetry_data.owner_session_id)
@@ -400,9 +401,7 @@ def resetTelemetry(session_id, device_id):
 
     now = time.time()
 
-    # ✅ Reset telemetry for the given device
-    with session_thread_lock:
-        telemetry_dataset[device_id] = TelemetryData(
+    telemetry_data = TelemetryData(
             owner_session_id=session_id,
             device_id=device_id,
             device_ipaddr=ipAddr,
@@ -416,6 +415,10 @@ def resetTelemetry(session_id, device_id):
             cpu_freq=[],
             cpu_usage=[],
         )
+
+    # ✅ Reset telemetry for the given device
+    with session_thread_lock:
+        telemetry_dataset[device_id] = telemetry_data
 
         response = vcat_http_proxy.get_device_http_response(
             session_id, device_id, ipAddr, "/api/telemetry/reset_framedrops"
@@ -432,6 +435,8 @@ def resetTelemetry(session_id, device_id):
     vcat_adb.log_console_entry(
         session_id, f"[VCAT] Telemetry reset for device {device_id}"
     )
+
+    return telemetry_data
 
 
 @app.route("/api/session_token", methods=["GET"])
@@ -843,31 +848,18 @@ def api_start_device_monitor():
     if not ip_port:
         return jsonify({"error": "Invalid device or unable to resolve IP/port"}), 400
     time.sleep(0.5)
-    with session_thread_lock:
-        telemetry_data = TelemetryData(
-            owner_session_id=session_id,
-            device_id=device_id,
-            device_ipaddr=ip_port,
-            device_info=device_info,
-            start_time=time.time(),
-            test_details=TestDetails(),
-            battery_data=[],
-            system_memory=[],
-            app_memory=[],
-            frame_drops=[],
-            cpu_freq=[],
+
+    telemetry_data = resetTelemetry(session_id, device_id)
+
+    touch_session_access(session_id, device_id)
+
+    create_telemetry_excel(telemetry_data)
+
+    if vcat_adb.console_thread is None or not vcat_adb.console_thread.is_alive():
+        vcat_adb.console_thread = threading.Thread(
+            target=telemetry_worker, daemon=True
         )
-
-        telemetry_dataset[device_id] = telemetry_data
-        session_last_access[device_id] = time.time()
-
-        create_telemetry_excel(telemetry_data)
-
-        if vcat_adb.console_thread is None or not vcat_adb.console_thread.is_alive():
-            vcat_adb.console_thread = threading.Thread(
-                target=telemetry_worker, daemon=True
-            )
-            vcat_adb.console_thread.start()
+        vcat_adb.console_thread.start()
 
     return jsonify({"status": "monitoring_started", "device_id": device_id}), 200
 
