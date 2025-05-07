@@ -602,7 +602,9 @@ function updateTestDetailsUI(data) {
         document.getElementById("test-framerate").value =
             (curVideo.framerate !== undefined) ? curVideo.framerate.toFixed(1) : "";
     }
-
+    
+    document.getElementById("test-state").value = details.testState || "";
+    updatePlayerControlsState();  // 👈 Add this here
 }
 
 
@@ -706,3 +708,31 @@ function confirmWirelessAdb() {
       alert("Wireless ADB setup failed.");
     });
 }
+
+function updatePlayerControlsState() {
+    const state = document.getElementById("test-state").value;
+    const shouldEnable = (state === "Running");
+
+    const controls = [
+        "btn-play-pause",
+        "btn-video-stats",
+        "btn-stop-test",
+    ];
+
+    controls.forEach((id) => {
+        const btn = document.getElementById(id);
+        if (shouldEnable) {
+            btn.style.pointerEvents = "auto";
+            btn.style.opacity = "1.0";
+            btn.style.cursor = "pointer";
+        } else {
+            btn.style.pointerEvents = "none";
+            btn.style.opacity = "0.4";
+            btn.style.cursor = "not-allowed";
+        }
+    });
+}
+
+
+
+

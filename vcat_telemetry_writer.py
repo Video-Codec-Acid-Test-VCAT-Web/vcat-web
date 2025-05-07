@@ -1,3 +1,5 @@
+import atexit
+import logging
 import os
 import re
 from datetime import datetime
@@ -22,13 +24,10 @@ class TelemetrySheet(str, Enum):
 workbook_handles: Dict[str, Workbook] = {}
 file_paths: Dict[str, str] = {}
 
+logger = logging.getLogger("VCAT")
+
 
 def format_device_filename(device_id: str, manufacturer: str, model: str) -> str:
-    """
-    Formats a safe filename string like: deviceid_manufacturer_model
-    Replaces spaces and unsafe characters with underscores.
-    """
-
     def sanitize(s: str) -> str:
         return re.sub(r"[^A-Za-z0-9._-]", "_", s.strip())
 
@@ -53,7 +52,6 @@ def create_telemetry_excel(telemetry_data: TelemetryData) -> str:
 
     sheet.title = TelemetrySheet.BATTERY.value
 
-    # Create and name remaining sheets
     for sheet_name in [
         TelemetrySheet.CPU_USAGE.value,
         TelemetrySheet.CPU_FREQ.value,
@@ -62,12 +60,10 @@ def create_telemetry_excel(telemetry_data: TelemetryData) -> str:
     ]:
         wb.create_sheet(sheet_name)
 
-    # Extract CPU core labels
     ccore_labels = [
         f"cpu{core.core_id}" for core in telemetry_data.device_info.cpu.cores
     ]
 
-    # Initialize headers
     wb[TelemetrySheet.BATTERY.value].append(["Elapsed Time (s)", "Battery Level (%)"])
     wb[TelemetrySheet.CPU_USAGE.value].append(
         ["Elapsed Time (s)", "total"] + ccore_labels
@@ -81,17 +77,17 @@ def create_telemetry_excel(telemetry_data: TelemetryData) -> str:
     )
 
     wb.save(filename)
-    workbook_handles[telemetry_data.device_id] = wb
-    file_paths[telemetry_data.device_id] = filename
-    print(f"📁 Created telemetry file: {filename}")
+    workbook_handles[telemetry_data.owner_session_id] = wb
+    file_paths[telemetry_data.owner_session_id] = filename
+    logger.info(f"📁 Created telemetry file: {filename}")
     return filename
 
 
-def append_telemetry(device_id: str, sheet: TelemetrySheet, rows: List[List[Any]]):
-    if device_id not in workbook_handles:
-        raise RuntimeError(f"Device workbook not initialized: {device_id}")
+def append_telemetry(session_id: str, sheet: TelemetrySheet, rows: List[List[Any]]):
+    if session_id not in workbook_handles:
+        raise RuntimeError(f"Device workbook not initialized: {session_id}")
 
-    wb = workbook_handles[device_id]
+    wb = workbook_handles[session_id]
     sheet_name = sheet.value
 
     if sheet_name not in wb.sheetnames:
@@ -101,4 +97,22 @@ def append_telemetry(device_id: str, sheet: TelemetrySheet, rows: List[List[Any]
     for row in rows:
         ws.append(row)
 
-    wb.save(file_paths[device_id])
+    wb.save(file_paths[session_id])
+
+
+def close_telemetry_excel(session_id: str):
+    if session_id in workbook_handles:
+        wb = workbook_handles.pop(session_id)
+        path = file_paths.pop(session_id, None)
+        if path:
+            wb.save(path)
+            logger.info(f"✅ Closed workbook for session: {session_id}")
+
+
+def cleanup_all_workbooks():
+    for session_id in list(workbook_handles.keys()):
+        close_telemetry_excel(session_id)
+    logger.info("🧹 All telemetry workbooks have been closed.")
+
+
+atexit.register(cleanup_all_workbooks)

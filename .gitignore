@@ -12,3 +12,6 @@ output/
 
 #log files
 logs/
+
+static/.DS_Store
+

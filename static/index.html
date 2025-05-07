@@ -155,9 +155,18 @@
                    border-radius: 8px;
                    border: 1px solid #555;
                  ">
-                   <img src="/static/btn_play_pause.png" alt="Play/Pause" style="width: 36px; height: 36px; cursor: pointer;" onclick="sendControlCommand('play_pause')" />
-                   <img src="/static/btn_video_stats.png" alt="Video Stats" style="width: 36px; height: 36px; cursor: pointer;" onclick="sendControlCommand('show_stats')" />
-                   <img src="/static/btn_stop_test.png" alt="Stop Test" style="width: 36px; height: 36px; cursor: pointer;" onclick="sendControlCommand('stop')" />
+                     <img id="btn-play-pause" src="/static/btn_play_pause.png" alt="Play/Pause" title="Play or Pause Video"
+                          style="width: 36px; height: 36px; cursor: not-allowed; opacity: 0.4; pointer-events: none;"
+                          onclick="sendControlCommand('play_pause')" />
+
+                     <img id="btn-video-stats" src="/static/btn_video_stats.png" alt="Video Stats" title="Show Video Stats"
+                          style="width: 36px; height: 36px; cursor: not-allowed; opacity: 0.4; pointer-events: none;"
+                          onclick="sendControlCommand('show_stats')" />
+
+                     <img id="btn-stop-test" src="/static/btn_stop_test.png" alt="Stop Test" title="Stop the Test"
+                          style="width: 36px; height: 36px; cursor: not-allowed; opacity: 0.4; pointer-events: none;"
+                          onclick="sendControlCommand('stop')" />
+
                  </div>
 
                </div>
