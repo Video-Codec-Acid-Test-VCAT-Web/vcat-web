@@ -22,30 +22,9 @@ import vcat_http_proxy
 
 from flask import Flask, jsonify, make_response, request, Response, send_from_directory
 from vcat_logging import logger
-from vcat_telemetry_data_models import (
-    AppMemoryEntry,
-    BatteryEntry,
-    CpuFreguencyEntry,
-    CpuUsageEntry,
-    CurrentTestVideo,
-    DeviceInfo,
-    FramedropEntry,
-    LRUCache,
-    MemoryEntry,
-    parse_device_info,
-    TelemetryData,
-    TestDetails,
-)
-from vcat_telemetry_writer import (
-    append_telemetry,
-    close_telemetry_excel,
-    create_telemetry_excel,
-    TelemetrySheet,
-)
-
-# Create logs directory if it doesn't exist
-os.makedirs("logs", exist_ok=True)
-
+from vcat_telemetry_data_models import * 
+from vcat_telemetry_writer import *
+from vcat_config import *
 
 # fail gracefully if we don't have the right version of Python
 if sys.version_info < (3, 9):
@@ -61,7 +40,7 @@ session_last_poll: OrderedDict[str, float] = OrderedDict()
 
 session_thread_lock = threading.RLock()
 
-MAX_CONSOLE_LINES = 500
+max_console_lines = get_config_option(ConfigKey.MAX_CONSOLE_LINES)
 
 app = Flask(__name__, static_folder="static")
 
@@ -220,12 +199,12 @@ def telemetry_worker():
 
     logger.info("starting telemetry polling thread")
 
-    MAX_ACCESS_SPAN = (
-        3600 * 2
-    )  # 2 hours without any activity on a connected device will be considered stale
+    session_idle_timeout = get_config_option(ConfigKey.TELEMETRY_SESSION_TIMEOUT)
 
-    long_poll_interval = 10 * 60  # 1 hour for each telemetry poll
-    initial_device_polling_time = 3 * 60
+    long_poll_interval = get_config_option(ConfigKey.DEVICE_POLL_STEADY)
+    initial_device_polling_time = get_config_option(ConfigKey.DEVICE_POLL_INITIAL)
+
+    session_state : OrderedDict[str, bool] = OrderedDict()
 
     while True:
         if not telemetry_dataset:
@@ -252,9 +231,9 @@ def telemetry_worker():
             last_access = session_last_access.get(device_id, 0)
             time_since_access = time.time() - last_access
 
-            if time_since_access > MAX_ACCESS_SPAN:
+            if time_since_access > session_idle_timeout:
                 logger.info(
-                    f"[Monitor] Device {device_id} stale for {time_since_access:.1f}s, removing from monitor list"
+                    f"[Monitor] Session {telemetry_data.owner_session_id} Device {device_id} stale for {time_since_access:.1f}s, removing from monitor list"
                 )
 
                 with session_thread_lock:
@@ -265,17 +244,36 @@ def telemetry_worker():
             test_details = get_test_details(telemetry_data.owner_session_id, device_id)
             telemetry_data.test_details = test_details
 
-            if test_details.testState != "Running":
-                logger.debug(
-                    f"[Monitor] Device {device_id} is not running a test, skipping telemetry collection"
-                )
-                continue
+            poll_when_not_testing = get_config_option(ConfigKey.TELEMETRY_COLLECTION) == TelemetryCollectionMode.ALWAYS
+            test_running = test_details.testState == "Running"
+
+            if test_running and poll_when_not_testing and not session_state.get(telemetry_data.owner_session_id, False) :
+                #we've just switched into test mode, reset all collected telemetry
+                logger.debug(f"[Monitor] Device {device_id} test active.  Resetting pre-test telemetry")
+                resetTelemetry(telemetry_data.owner_session_id, device_id)
+
+            session_state[telemetry_data.owner_session_id] = test_running
+
+            if not test_running:
+                if not poll_when_not_testing :
+                    logger.debug(
+                        f"[Monitor] Device {device_id} is not running a test, skipping telemetry collection"
+                    )
+                    continue
+                else :
+                    logger.debug(
+                        f"[Monitor] Device {device_id} is not running a test, only collecting system stats"
+                    )
 
             battery = vcat_adb.get_battery_level(device_id)
             elapsed = time.time() - telemetry_data.start_time
             total_kb, used_kb = vcat_adb.get_system_memory(device_id)
             app_kb = vcat_adb.get_app_memory(device_id)
-            frame_drops = get_frame_drops(telemetry_data.owner_session_id, device_id)
+
+            if test_running:
+                frame_drops = get_frame_drops(telemetry_data.owner_session_id, device_id)
+            else:
+                frame_drops = None
 
             if telemetry_data.cpu_usage:
                 prev_raw_data = telemetry_data.cpu_usage[-1].raw_stats
@@ -394,20 +392,17 @@ def telemetry_worker():
                         [freq_row],
                     )
 
-        time.sleep(30)
+        time.sleep(get_config_option(ConfigKey.TELEMETRY_LOOP_POLL_INTERVAL))
 
 
-MAX_SESSION_ACCESS_SPAN = 30 * 60  # 30 minutes
-
-
-def session_cleanup_loop():
+def console_cleanup_loop():
     while True:
         now = time.time()
         with session_thread_lock:
             expired = [
                 sid
                 for sid, log in vcat_adb.session_consoles.items()
-                if now - log.last_access > MAX_SESSION_ACCESS_SPAN
+                if now - log.last_access > get_config_option(ConfigKey.CONSOLE_TIMEOUT)
             ]
             for sid in expired:
                 logger.debug(f"[Session Cleanup] Expiring session {sid}")
@@ -963,10 +958,8 @@ def api_vcat_monitor_reset(session_id, device_id):
 ##########################################
 
 # Start the cleanup thread
-cleanup_thread = threading.Thread(target=session_cleanup_loop, daemon=True)
+cleanup_thread = threading.Thread(target=console_cleanup_loop, daemon=True)
 cleanup_thread.start()
-
-vcat_http_proxy.setRouting(vcat_http_proxy.RoutingMethod.ADB)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="VCAT Telemetry Server")

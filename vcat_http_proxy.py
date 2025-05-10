@@ -8,18 +8,15 @@ import vcat_adb
 import requests
 from flask import Response
 from requests.models import Response as RequestsResponse
+from vcat_config import *
 
-
-class RoutingMethod(Enum):
-    HTTP = "http"
-    ADB = "adb"
 
 
 # Global routing preference (default: HTTP)
-_current_routing_method = RoutingMethod.HTTP
+_current_routing_method = get_config_option(ConfigKey.DEFAULT_HTTP_ROUTING)
 
 
-def setRouting(method: RoutingMethod):
+def setRouting(method: HttpRoutingMode):
     global _current_routing_method
     _current_routing_method = method
 
@@ -65,7 +62,7 @@ def http_get_via_network(ipAddr: str, path: str) -> Response:
 
 
 def get_device_http_response(session_id, device_id: str, ipAddr: str, path: str) -> Response:
-    if _current_routing_method == RoutingMethod.ADB:
+    if _current_routing_method == HttpRoutingMode.ADB_TUNNELING.value:
         return http_get_via_adb(session_id, device_id, ipAddr, path)
     else:
         return http_get_via_network(ipAddr, path)
@@ -115,7 +112,7 @@ def http_post_via_network(ipAddr: str, path: str, json_payload: Optional[dict] =
 def post_device_http_response(
     device_id: str, ipAddr: str, path: str, json_payload: Optional[dict] = None
 ) -> Response:
-    if _current_routing_method == RoutingMethod.ADB:
+    if _current_routing_method == HttpRoutingMode.ADB_TUNNELING.value:
         return http_post_via_adb(device_id, path, json_payload)
     else:
         try:

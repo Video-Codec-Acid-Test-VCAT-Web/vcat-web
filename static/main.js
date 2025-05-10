@@ -436,8 +436,6 @@ function fetchAndUpdateTelemetry() {
 
       if (testDetails) {
           updateTestDetailsUI({ test_details: testDetails });
-          if(testDetails.testState != "Running")
-              return;
       }
       updateBatteryChart(telemetry);
       updateCpuChart(telemetry);

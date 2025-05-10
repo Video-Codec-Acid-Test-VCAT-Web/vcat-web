@@ -1,5 +1,4 @@
 import atexit
-import logging
 import os
 import re
 from datetime import datetime
@@ -8,7 +7,16 @@ from typing import Any, Dict, List
 
 from openpyxl import Workbook
 
+from vcat_logging import logger  # ✅ shared logger
 from vcat_telemetry_data_models import TelemetryData
+
+__all__ = [
+    "append_telemetry",
+    "close_telemetry_excel",
+    "create_telemetry_excel",
+    "TelemetrySheet",
+]
+
 
 
 # Sheet name enum for safe usage
@@ -23,8 +31,6 @@ class TelemetrySheet(str, Enum):
 # Maintain open workbooks in memory per device
 workbook_handles: Dict[str, Workbook] = {}
 file_paths: Dict[str, str] = {}
-
-logger = logging.getLogger("VCAT")
 
 
 def format_device_filename(device_id: str, manufacturer: str, model: str) -> str:
