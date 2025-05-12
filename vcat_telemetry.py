@@ -15,6 +15,12 @@ from functools import wraps
 from re import S
 from typing import Dict, List, Optional, Tuple
 from urllib.parse import urlparse
+import subprocess
+import atexit
+
+# Keep Mac awake while server is running
+caffeinate_proc = subprocess.Popen(["caffeinate", "-i"])
+
 
 import requests
 import vcat_adb
@@ -202,7 +208,8 @@ def telemetry_worker():
     session_idle_timeout = get_config_option(ConfigKey.TELEMETRY_SESSION_TIMEOUT)
 
     long_poll_interval = get_config_option(ConfigKey.DEVICE_POLL_STEADY)
-    initial_device_polling_time = get_config_option(ConfigKey.DEVICE_POLL_INITIAL)
+    initial_poll_interval= get_config_option(ConfigKey.DEVICE_POLL_INITIAL)
+    time_to_steady = get_config_option(ConfigKey.DEVICE_POLL_TIME_TO_STEADY)
 
     session_state : OrderedDict[str, bool] = OrderedDict()
 
@@ -220,7 +227,7 @@ def telemetry_worker():
             time_since_last_poll = iteration_start_time - last_poll
 
             if (
-                elapsed > initial_device_polling_time
+                elapsed > time_to_steady
                 and time_since_last_poll < long_poll_interval
             ):
                 continue  # Skip polling this device for now
@@ -971,3 +978,8 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
     app.run(host=args.host, port=args.port, debug=True)
+
+@atexit.register
+def cleanup_caffeinate():
+    if caffeinate_proc and caffeinate_proc.poll() is None:
+        caffeinate_proc.terminate()

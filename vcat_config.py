@@ -42,11 +42,11 @@ DEFAULT_CONFIG = {
     ConfigKey.MAX_CONSOLE_LINES: 500,
     ConfigKey.DEVICE_POLL_INITIAL: 10, # when first monitoring a device, collect telemetry every n seconds
     ConfigKey.DEVICE_POLL_STEADY: 30, # after DEVICE_POLL_TIME_TO_STEADY has elapsed, collect telemetry every n seconds
-    ConfigKey.DEVICE_POLL_TIME_TO_STEADY: 600,
+    ConfigKey.DEVICE_POLL_TIME_TO_STEADY: 600, # after n seconds, switch to steady state
     ConfigKey.DEFAULT_HTTP_ROUTING: HttpRoutingMode.ADB_TUNNELING.value,
     ConfigKey.TELEMETRY_PATH: "output",
     ConfigKey.TELEMETRY_COLLECTION: TelemetryCollectionMode.ALWAYS.value,
-    ConfigKey.TELEMETRY_LOOP_POLL_INTERVAL: 30
+    ConfigKey.TELEMETRY_LOOP_POLL_INTERVAL: 10
 }
 
 def _load_config_file(path="vcat_config.json") -> dict:
