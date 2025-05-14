@@ -7,6 +7,7 @@ import time
 from datetime import datetime
 import subprocess
 from dataclasses import dataclass
+from vcat_logging import logger
 
 @dataclass
 class SessionConsoleLogEntry:
@@ -89,6 +90,7 @@ def run_adb_command_with_log(
                 log_text += f"[OUT] {output}\n"
             if error:
                 log_text += f"[ERR] {error}"
+                logger.error(log_text)
             log_console_entry(session_id, log_text)
 
         return output
@@ -120,11 +122,11 @@ def is_valid_device(session_id, device_id):
 
 def send_adb_broadcast(session_id, device_id, command_key, extras=None):
     if not is_valid_device(session_id, device_id):
-        print("[ERROR] Invalid device.")
+        logger.error(f"[ERROR] Invalid device.")
         return
 
     if command_key not in BROADCAST_COMMANDS:
-        print(f"[ERROR] Unknown broadcast command: {command_key}")
+        logger.error(f"[ERROR] Unknown broadcast command: {command_key}")
         return
 
     base_cmd = [
@@ -170,7 +172,7 @@ def get_cpu_frequencies(device_id):
         }  # Convert to MHz
         return freq_dict
     except Exception as e:
-        print(f"[get_cpu_frequencies ERROR] {e}")
+        logger.error(f"[get_cpu_frequencies ERROR] {e}")
         return {}
 
 ipCache: OrderedDict[str, str] = OrderedDict()
@@ -206,15 +208,16 @@ def get_device_ip_and_port(session_id, device_id):
             return f"http://{ip_address}:{port}"
 
         else:
+            logger.error("[VCAT] ERROR: Could not find HTTP server line in logcat")
             log_console_entry(
                 session_id, "[VCAT] ERROR: Could not find HTTP server line in logcat"
             )
             return None
 
     except Exception as e:
-        log_console_entry(
-            session_id, f"[VCAT] Exception during IP/port retrieval: {str(e)}"
-        )
+        msg = f"[VCAT] Exception during IP/port retrieval: {str(e)}"
+        logger.error(msg)
+        log_console_entry(session_id, msg)
         return None
 
 
@@ -230,7 +233,7 @@ def get_battery_level(device_id):
             if "level:" in line:
                 return int(line.strip().split(":")[1].strip())
     except Exception as e:
-        print(f"[Battery Error] {e}")
+        logger.error(f"[Battery Error] {e}")
     return None
 
 
@@ -267,5 +270,5 @@ def get_app_memory(device_id, package="org.videolan.vlc"):
                 if len(parts) >= 2 and parts[1].isdigit():
                     return int(parts[1])  # PSS in KB
     except Exception as e:
-        print(f"[get_app_memory ERROR] {e}")
+        logger.error(f"[get_app_memory ERROR] {e}")
     return None

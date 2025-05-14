@@ -960,6 +960,17 @@ def api_vcat_monitor_reset(session_id, device_id):
     return jsonify({"status": "telemetry reset completed"}), 200
 
 
+@app.route("/api/vcat_monitor/connected", methods=["POST"])
+@require_valid_session_and_device
+def api_vcat_monitor_is_connected(session_id, device_id):
+
+    if not device_id in telemetry_dataset:
+        logger.info(f"/api/vcat_monitor/raw_cpu: not monitoring device [{device_id}]")
+        return jsonify({"status": "not_monitoring", "device_id": device_id}), 204
+
+    return jsonify({"status": "telemetry connected", "device_id": device_id}), 200
+
+
 ##########################################
 # Main code area
 ##########################################

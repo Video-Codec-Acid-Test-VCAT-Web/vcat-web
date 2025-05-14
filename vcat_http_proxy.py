@@ -9,7 +9,7 @@ import requests
 from flask import Response
 from requests.models import Response as RequestsResponse
 from vcat_config import *
-
+from vcat_logging import logger
 
 
 # Global routing preference (default: HTTP)
@@ -45,6 +45,7 @@ def http_get_via_adb(session_id: str, device_id: str, ipAddr: str, path: str) ->
         return Response(body, status=200, mimetype="application/json")
 
     except Exception as e:
+        logger.error(f"ADB GET failed: {e}")
         return Response(f"ADB GET failed: {str(e)}", status=500)
 
 
@@ -58,6 +59,7 @@ def http_get_via_network(ipAddr: str, path: str) -> Response:
             mimetype="application/json",
         )
     except Exception as e:
+        logger.error(f"Network GET failed: {e}")
         return Response(f"Network GET failed: {str(e)}", status=500)
 
 
@@ -92,6 +94,7 @@ def http_post_via_adb(
         body = body_match.group(1).strip().rstrip("%")
         return Response(body, status=200, mimetype="application/json")
     except Exception as e:
+        logger.error(f"ADB POST failed: {e}")
         return Response(f"ADB POST failed: {str(e)}", status=500)
 
 
@@ -106,6 +109,7 @@ def http_post_via_network(ipAddr: str, path: str, json_payload: Optional[dict] =
             mimetype=response.headers.get("Content-Type", "application/json"),
         )
     except Exception as e:
+        logger.error(f"Network POST failed: {e}")
         return Response(f"Network POST failed: {str(e)}", status=500)
 
 
@@ -118,4 +122,5 @@ def post_device_http_response(
         try:
             return http_post_via_network(ipAddr, path, json_payload)
         except Exception as e:
+            logger.error(f"Network POST failed: {e}")
             return Response(f"Network POST failed: {str(e)}", status=500)
