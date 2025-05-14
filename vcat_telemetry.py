@@ -900,6 +900,23 @@ def api_start_device_monitor(session_id, device_id):
     return jsonify({"status": "monitoring_started", "device_id": device_id}), 200
 
 
+@app.route("/api/vcat_monitor/connected", methods=["GET"])
+@require_valid_session_and_device
+def api_is_connected(session_id, device_id):
+    global console_thread
+
+    if device_id in telemetry_dataset:
+        return jsonify({
+            "monitored": True,
+            "status": f"device_id '{device_id}' is being monitored by session_id '{session_id}'"
+        }), 200
+
+    return jsonify({
+        "monitored": False,
+        "status": f"device_id '{device_id}' is not being monitored by session_id '{session_id}'"
+    }), 200
+
+
 @app.route("/api/vcat_monitor/stop", methods=["POST"])
 @require_valid_session_and_device
 def api_stop_device_monitor(session_id, device_id):

@@ -81,47 +81,118 @@ function waitForChartAndStartPolling() {
   }
 }
 
-function handleConnectClick() {
-  const button = document.getElementById("connect-btn");
 
-  if (session_token && selectedDevice) {
-    // 🔌 Disconnect
-    console.log("🔌 Disconnecting from device...");
-    selectedDevice = null;
+async function setDeviceConnectionState() {
+  const deviceId = selectedDevice;
+  const sessionId = session_token;
+  const btn = document.getElementById("connect-btn");
 
-    // Reset UI
-    document.getElementById("device-info").innerHTML = "";
-    document.getElementById("console-log").textContent = "";
-    button.textContent = "Connect";
+  if (!deviceId || !sessionId) {
+    console.warn("Missing session or device ID");
+    btn.disabled = true;
+    btn.style.opacity = "0.5";
+    btn.style.cursor = "not-allowed";
     return;
   }
 
-  // 🔗 Connect
+  try {
+    const res = await fetch(`/api/vcat_monitor/connected?session=${sessionId}&device=${deviceId}`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+
+    const data = await res.json();
+
+    if (data.monitored) {
+      // Device is connected
+      btn.src = "/static/btn_disconnect_device.png";
+      btn.title = "Disconnect";
+      btn.alt = "Disconnect";
+      btn.onclick = handleDisconnectClick;
+    } else {
+      // Device is disconnected
+      btn.src = "/static/btn_connect_device.png";
+      btn.title = "Connect";
+      btn.alt = "Connect";
+      btn.onclick = handleConnectClick;
+    }
+
+    // Re-enable button in all valid cases
+    btn.disabled = false;
+    btn.style.opacity = "1.0";
+    btn.style.cursor = "pointer";
+
+  } catch (err) {
+    console.error("Failed to check connection state:", err);
+    btn.disabled = true;
+    btn.style.opacity = "0.5";
+    btn.style.cursor = "not-allowed";
+    btn.title = "Unavailable";
+  }
+}
+
+
+
+function handleConnectClick() {
   const deviceId = document.getElementById("device").value;
   if (!deviceId) return alert("Select a device first.");
 
   selectedDevice = deviceId;
-  button.textContent = "Disconnect";
 
-    if (!window.telemetryInterval) {
-      waitForChartAndStartPolling();
-    }
-
+  // Start telemetry polling if not already running
+  if (!window.telemetryInterval) {
+    waitForChartAndStartPolling();
+  }
 
   fetchDeviceInfo(deviceId);
 
-    fetch(`${API_BASE}/api/vcat_monitor/start?session=${session_token}&device=${deviceId}`, {
-      method: "POST"
+  fetch(`${API_BASE}/api/vcat_monitor/start?session=${session_token}&device=${deviceId}`, {
+    method: "POST"
+  })
+    .then(res => {
+      if (!res.ok) throw new Error("Failed to start telemetry");
+      console.log("🚀 Telemetry started");
+      setTimeout(updateConsoleLog, 500);
+      // Update the connection state externally
+      setDeviceConnectionState();
     })
-      .then(res => {
-        if (!res.ok) throw new Error("Failed to start telemetry");
-        console.log("🚀 Telemetry started");
-          setTimeout(updateConsoleLog, 500);
-      })
-      .catch(err => {
-        console.error("❌ Telemetry start failed:", err);
-      });
+    .catch(err => {
+      console.error("❌ Telemetry start failed:", err);
+      const button = document.getElementById("connect-btn");
+      button.disabled = true;
+      button.style.opacity = "0.5";
+      button.style.cursor = "not-allowed";
+    });
 }
+
+function handleDisconnectClick() {
+  const deviceId = document.getElementById("device").value;
+  if (!deviceId) return alert("Select a device first.");
+
+  fetch(`${API_BASE}/api/vcat_monitor/stop?session=${session_token}&device=${deviceId}`, {
+    method: "POST"
+  })
+    .then(res => {
+      if (!res.ok) throw new Error("Failed to stop telemetry");
+      console.log("🛑 Telemetry stopped");
+
+      // Stop polling loop if needed
+      if (window.telemetryInterval) {
+        clearInterval(window.telemetryInterval);
+        window.telemetryInterval = null;
+      }
+
+      // Update UI to reflect disconnected state
+      setDeviceConnectionState();
+      resetTelemetry();
+    })
+    .catch(err => {
+      console.error("❌ Telemetry stop failed:", err);
+      const button = document.getElementById("connect-btn");
+      button.disabled = true;
+      button.style.opacity = "0.5";
+      button.style.cursor = "not-allowed";
+    });
+}
+
 
 function updateConsoleLog() {
   fetch(`${API_BASE}/api/session_console_log?session=${session_token}`)
@@ -632,11 +703,33 @@ function confirmResetTelemetry() {
   closeResetModal();
 }
 
+function resetTestStatus() {
+  // Top-level test info
+  document.getElementById("test-state").value = "";
+  document.getElementById("test-start-time").value = "";
+  document.getElementById("test-playlist").value = "";
+
+  // Current Test Video section
+  document.getElementById("current-start-time").value = "";
+  document.getElementById("test-file").value = "";
+  document.getElementById("test-codec").value = "";
+  document.getElementById("test-decoder").value = "";
+  document.getElementById("test-resolution").value = "";
+  document.getElementById("test-mimetype").value = "";
+  document.getElementById("test-bitrate").value = "";
+  document.getElementById("test-framerate").value = "";
+
+  updatePlayerControlsState();  // 👈 Keep player controls in sync
+}
+
+
 function resetTelemetry() {
     if (!session_token || !selectedDevice) {
     console.error("❌ Session or device not selected!");
     return;
     }
+    
+    resetTestStatus();
 
     // Clear existing chart data immediately
     if (batteryChart) {
@@ -730,6 +823,8 @@ function updatePlayerControlsState() {
         }
     });
 }
+
+
 
 
 
