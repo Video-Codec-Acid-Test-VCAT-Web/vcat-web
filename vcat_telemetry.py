@@ -480,7 +480,7 @@ def get_device_info(
             resp.status_code = 500
             return None, resp
 
-        device_info = parse_device_info(data)
+        device_info = parse_device_info(data, ip_addr)
         device_info_cache[device_id] = device_info
         return device_info, None
 
@@ -534,7 +534,7 @@ def require_valid_session_and_device(func):
     return wrapper
 
 
-def get_required_ip(session_id: str, device_id: str):
+def get_required_ip_and_port(session_id: str, device_id: str):
     ip_addr = vcat_adb.get_device_ip_and_port(session_id, device_id)
     if not ip_addr:
         logger.error(
@@ -543,6 +543,15 @@ def get_required_ip(session_id: str, device_id: str):
         raise ValueError("Could not determine IP or port")
     return ip_addr
 
+
+def get_required_ip(session_id: str, device_id: str):
+    ip_addr = vcat_adb.get_device_ip(session_id, device_id)
+    if not ip_addr:
+        logger.error(
+            f"Unable to determine IP for session: [{session_id}] device: [{device_id}]"
+        )
+        raise ValueError("Could not determine IP or port")
+    return ip_addr
 
 @app.route("/api/session_token", methods=["GET"])
 def session_token():
@@ -596,6 +605,35 @@ def api_reset_session_console_log(session_id):
 # Device management
 ##########################################
 
+@app.route('/api/device/ping')
+@require_valid_session_and_device
+def ping_device(session_id, device_id):
+    
+    ip_addr = get_required_ip(session_id, device_id)
+
+    try:
+        result = subprocess.run(["ping", "-c", "1", "-W", "1", ip_addr],
+                                capture_output=True, text=True, check=False)
+
+        # Write the actual ping output line-by-line into the console
+        for line in result.stdout.strip().splitlines():
+            vcat_adb.log_console_entry(session_id, line.strip())
+
+        # Also log stderr if present (e.g. if ping fails)
+        if result.stderr:
+            for line in result.stderr.strip().splitlines():
+                vcat_adb.log_console_entry(session_id, line.strip())
+
+        return jsonify(success=(result.returncode == 0), message="Ping complete")
+
+    except subprocess.TimeoutExpired:
+        logger.error(session_id, f"Ping to {ip_addr} timed out.")
+        return jsonify(success=False, message="Ping timed out")
+
+    except Exception as e:
+        logger.error(session_id, f"Ping error: {str(e)}")
+        return jsonify(success=False, message="Ping error")
+
 
 @app.route("/api/all_connected_devices", methods=["GET"])
 @require_valid_session
@@ -609,7 +647,7 @@ def api_ip_port(session_id, device_id):
 
     ip_addr = ""
     try:
-        ip_addr = get_required_ip(session_id, device_id)
+        ip_addr = get_required_ip_and_port(session_id, device_id)
         return jsonify({"address": ip_addr})
 
     except ValueError as e:
@@ -624,7 +662,7 @@ device_info_cache: LRUCache[str, DeviceInfo] = LRUCache(10)
 def api_device_info(session_id, device_id):
 
     try:
-        ip_addr = get_required_ip(session_id, device_id)
+        ip_addr = get_required_ip_and_port(session_id, device_id)
         device_info, error_response = get_device_info(session_id, device_id, ip_addr)
         if error_response:
             return error_response
@@ -647,7 +685,7 @@ def api_device_info(session_id, device_id):
 def api_device_run_config(session_id, device_id):
 
     try:
-        ip_addr = get_required_ip(session_id, device_id)
+        ip_addr = get_required_ip_and_port(session_id, device_id)
 
         try:
             response = vcat_http_proxy.get_device_http_response(
@@ -668,7 +706,7 @@ def api_device_run_config(session_id, device_id):
 def api_device_stop(session_id, device_id):
 
     try:
-        ip_addr = get_required_ip(session_id, device_id)
+        ip_addr = get_required_ip_and_port(session_id, device_id)
 
         return vcat_http_proxy.get_device_http_response(
             session_id, device_id, ip_addr, "/api/control/stop"
@@ -681,7 +719,7 @@ def api_device_stop(session_id, device_id):
 @require_valid_session_and_device
 def api_device_show_stats(session_id, device_id):
     try:
-        ip_addr = get_required_ip(session_id, device_id)
+        ip_addr = get_required_ip_and_port(session_id, device_id)
 
         return vcat_http_proxy.get_device_http_response(
             session_id, device_id, ip_addr, "/api/control/show_stats"
@@ -694,7 +732,7 @@ def api_device_show_stats(session_id, device_id):
 @require_valid_session_and_device
 def api_device_playpause(session_id, device_id):
     try:
-        ip_addr = get_required_ip(session_id, device_id)
+        ip_addr = get_required_ip_and_port(session_id, device_id)
 
         return vcat_http_proxy.get_device_http_response(
             session_id, device_id, ip_addr, "/api/control/playpause"
@@ -712,7 +750,7 @@ def api_enable_wireless_adb(session_id, device_id):
 
         # Step 1: Find device IP address
         try:
-            ip_addr = get_required_ip(session_id, device_id)
+            ip_addr = get_required_ip_and_port(session_id, device_id)
         except ValueError as e:
             return jsonify({"error": str(e)}), 404
 
@@ -874,7 +912,7 @@ def api_start_device_monitor(session_id, device_id):
 
     # Step 1: Find device IP address
     try:
-        ip_addr = get_required_ip(session_id, device_id)
+        ip_addr = get_required_ip_and_port(session_id, device_id)
     except ValueError as e:
         return jsonify({"error": str(e)}), 404
 
@@ -930,6 +968,7 @@ def api_stop_device_monitor(session_id, device_id):
         session_last_access.pop(device_id, None)
         close_telemetry_excel(session_id)
 
+    logger.info(f"api/vcat_monitor/stop: executed for device id '[{device_id}] and session_id '[{session_id}]")
     return jsonify({"status": "monitoring_stopped", "device_id": device_id}), 200
 
 

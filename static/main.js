@@ -31,6 +31,7 @@ function populateDeviceDropdown() {
         });
 
           setTimeout(updateConsoleLog, 500);
+          handleDeviceSelection();
       })
       .catch(err => {
         console.error("❌ Failed to fetch devices:", err);
@@ -203,67 +204,64 @@ function updateConsoleLog() {
       const lastEntry = data.log.at(-1).text.trim();
       const fullLog = data.log.map(entry => entry.text.trim()).join('\n\n');
 
-      // Update full modal view
-      document.getElementById("console-full").textContent = fullLog;
+        // Update floating console
+        const modalConsole = document.getElementById("console-full");
+        if (modalConsole) modalConsole.textContent = fullLog;
+
+        // ✅ Also update embedded console (in device modal)
+        const embeddedConsole = document.getElementById("device-console-body");
+        if (embeddedConsole) embeddedConsole.textContent = fullLog;
     })
     .catch(err => {
       console.error("❌ Failed to fetch console log:", err);
     });
 }
 
+function loadPlaylistFiles(deviceId) {
+    
+}
 
+function extractIpBase(raw) {
+  if (!raw || typeof raw !== "string") return "—";
+  return raw.replace(/^https?:\/\//, "").split(":")[0] || "—";
+}
 
-function openDeviceModal(event) {
-  const modal = document.getElementById("device-modal");
-  const modalContent = document.getElementById("device-modal-content");
-  const modalBody = document.getElementById("device-modal-body");
-
+function openDeviceModal() {
   if (!currentDeviceInfo) {
-    modalBody.innerHTML = "<em>No device information available.</em>";
-  } else {
-    const d = currentDeviceInfo;
-
-    const soc = `${d.soc_manufacturer} ${d.soc}`;
-    const resolution = `${d.display_resolution.width}×${d.display_resolution.height}`;
-    const storage = `Storage (total/free): ${d.storage.total} / ${d.storage.available}`;
-    const memory = `Memory (total/free): ${d.memory.total} / ${d.memory.available}`;
-
-    const coreCounts = {};
-    Object.values(d.cpu.cores).forEach(core => {
-      const match = core.match(/Cortex-[A-Z0-9]+/);
-      const freqMatch = core.match(/(\d+)\s*MHz/);
-      if (match && freqMatch) {
-        const label = `${(parseInt(freqMatch[1]) / 1000).toFixed(1)} GHz ${match[0]}`;
-        coreCounts[label] = (coreCounts[label] || 0) + 1;
-      }
-    });
-
-    const coreLines = Object.entries(coreCounts)
-      .map(([label, count]) => `&nbsp;&nbsp;&nbsp;&nbsp;${count}×${label}`)
-      .join("<br>");
-
-    const cpu = `ARMv8:<br>${coreLines}`;
-
-    modalBody.innerHTML = `
-      Display: ${resolution}<br>
-      ${soc}<br>
-      ${cpu}<br>
-      ${storage}<br>
-      ${memory}
-    `;
+    document.getElementById("device-ip").textContent = "Unavailable";
+    return;
   }
 
-  // ✅ Use event to find button position
-  const rect = event.target.getBoundingClientRect();
-  modalContent.style.top = `${rect.bottom + window.scrollY + 8}px`;
-  modalContent.style.left = `${rect.left + window.scrollX}px`;
+  const d = currentDeviceInfo;
 
-  modal.style.display = "block";
+  document.getElementById("device-ip").textContent = extractIpBase(d.ip_addr);
 
-  setTimeout(() => {
-    document.addEventListener("click", handleOutsideClick);
-  }, 0);
+  document.getElementById("device-display").textContent = `${d.display_resolution.width}×${d.display_resolution.height}`;
+  document.getElementById("device-soc").textContent = `${d.soc_manufacturer} ${d.soc}`;
+  document.getElementById("device-storage").textContent = `${d.storage.total} / ${d.storage.available}`;
+  document.getElementById("device-memory").textContent = `${d.memory.total} / ${d.memory.available}`;
+
+  const coreCounts = {};
+  Object.values(d.cpu.cores).forEach(core => {
+    const match = core.match(/Cortex-[A-Z0-9]+/);
+    const freqMatch = core.match(/(\d+)\s*MHz/);
+    if (match && freqMatch) {
+      const label = `${(parseInt(freqMatch[1]) / 1000).toFixed(1)} GHz ${match[0]}`;
+      coreCounts[label] = (coreCounts[label] || 0) + 1;
+    }
+  });
+
+  const coreLines = Object.entries(coreCounts)
+    .map(([label, count]) => `${count}×${label}`)
+    .join(", ");
+
+  document.getElementById("device-cpu").textContent = `ARMv8: ${coreLines}`;
+
+  loadPlaylistFiles(d.device_id);
+
+  document.getElementById("device-modal").style.display = "block";
 }
+
 
 function closeDeviceModal() {
   document.getElementById("device-modal").style.display = "none";
@@ -825,6 +823,38 @@ function updatePlayerControlsState() {
 }
 
 
+function handleDeviceSelection() {
+  const deviceSelect = document.getElementById("device");
+  const expandBtn = document.getElementById("expand-btn");
+  const selectedDeviceId = deviceSelect.value;
+
+  const hasValidDevice = selectedDeviceId && deviceSelect.options.length > 0;
+
+  if (hasValidDevice) {
+    expandBtn.style.display = "inline";
+    fetchDeviceInfo(selectedDeviceId);
+  } else {
+    expandBtn.style.display = "none";
+  }
+}
+
+function pingDevice() {
+    const deviceSelect = document.getElementById("device");
+    const selectedDeviceId = deviceSelect.value;
+    const url = `${API_BASE}/api/device/ping?session=${session_token}&device=${selectedDeviceId}`;
+
+    fetch(url)
+        .then(res => res.json())
+        .then(data => {
+            // Optionally show a toast or notification
+            console.log("Ping completed:", data.message);
+            setTimeout(updateConsoleLog, 500);  // Refresh console shortly after ping finishes
+        })
+        .catch(err => {
+            console.error("Ping request failed:", err);
+            setTimeout(updateConsoleLog, 500);
+        });
+}
 
 
 

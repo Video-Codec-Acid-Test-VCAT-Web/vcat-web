@@ -1,5 +1,5 @@
 from dataclasses import asdict, dataclass, field, is_dataclass
-from typing import Dict, List
+from typing import Dict, List, Optional
 import re
 import threading
 from collections import OrderedDict
@@ -176,6 +176,22 @@ def get_cpu_frequencies(device_id):
         return {}
 
 ipCache: OrderedDict[str, str] = OrderedDict()
+
+def get_device_ip(session_id: str, device_id: str) -> Optional[str]:
+    cmd = ["adb", "-s", device_id, "shell", "ip", "route"]
+    output = run_adb_command_with_log(session_id, device_id, cmd)
+
+    if not output:
+        return None
+
+    # Look for 'src <ip>' in output
+    for line in output.splitlines():
+        match = re.search(r"\bsrc\s+(\d+\.\d+\.\d+\.\d+)", line)
+        if match:
+            return match.group(1)
+
+    return None
+    
 
 def get_device_ip_and_port(session_id, device_id):
     

@@ -60,6 +60,7 @@ class DeviceInfo:
     soc_manufacturer: str = ""
     soc: str = ""
     android_version: str = ""
+    ip_addr: str = "none"
     cpu: CPUInfo = field(default_factory=CPUInfo)
     display_resolution: DisplayResolution = field(default_factory=DisplayResolution)
     memory: MemoryInfo = field(default_factory=MemoryInfo)
@@ -71,6 +72,7 @@ class DeviceInfo:
             "model": self.model,
             "soc_manufacturer": self.soc_manufacturer,
             "soc": self.soc,
+            "ip_addr" : self.ip_addr,
             "android_version": self.android_version,
             "cpu": {
                 "architecture": self.cpu.architecture,
@@ -181,7 +183,7 @@ def parse_cores(core_dict: dict) -> List[CoreInfo]:
     return sorted(cores, key=lambda c: c.core_id)
 
 
-def parse_device_info(data: dict) -> DeviceInfo:
+def parse_device_info(data: dict, ip_addr) -> DeviceInfo:
     cpu_info = CPUInfo(
         architecture=data["cpu"]["architecture"],
         cores=parse_cores(data["cpu"]["cores"]),
@@ -192,6 +194,7 @@ def parse_device_info(data: dict) -> DeviceInfo:
         soc_manufacturer=data["soc_manufacturer"],
         soc=data["soc"],
         android_version=data["android_version"],
+        ip_addr=ip_addr,
         cpu=cpu_info,
         display_resolution=DisplayResolution(**data["display_resolution"]),
         memory=MemoryInfo(**data["memory"]),
