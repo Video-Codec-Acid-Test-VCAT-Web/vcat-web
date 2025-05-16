@@ -5,7 +5,10 @@ from datetime import datetime
 from enum import Enum
 from typing import Any, Dict, List
 
-from openpyxl import Workbook
+from openpyxl import Workbook, __version__
+
+print(f"[DEBUG] openpyxl version: {__version__}")
+print(f"[DEBUG] Workbook type: {type(Workbook)}")
 
 from vcat_logging import logger  # ✅ shared logger
 from vcat_telemetry_data_models import TelemetryData
@@ -52,6 +55,11 @@ def create_telemetry_excel(telemetry_data: TelemetryData) -> str:
     filename = f"output/{base_filename}_{timestamp}.xlsx"
 
     wb = Workbook()
+
+    print(f"[DEBUG] Created workbook: {wb}")
+    print(f"[DEBUG] Sheet names: {wb.sheetnames}")
+    print(f"[DEBUG] Active sheet: {wb.active}")
+
     sheet = wb.active
     if sheet is None:
         raise RuntimeError("Workbook has no active worksheet!")
@@ -91,7 +99,7 @@ def create_telemetry_excel(telemetry_data: TelemetryData) -> str:
 
 def append_telemetry(session_id: str, sheet: TelemetrySheet, rows: List[List[Any]]):
     if session_id not in workbook_handles:
-        raise RuntimeError(f"Device workbook not initialized: {session_id}")
+        logger.critical(f"Device workbook not initialized: {session_id}")
 
     wb = workbook_handles[session_id]
     sheet_name = sheet.value

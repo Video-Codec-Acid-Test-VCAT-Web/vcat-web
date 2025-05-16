@@ -9,6 +9,15 @@ import subprocess
 from dataclasses import dataclass
 from vcat_logging import logger
 
+__all__ = [
+    "SessionConsoleLogEntry",
+    "SessionConsole",
+    "touchConsole",
+    "log_console_entry",
+    "run_adb_command_with_log"
+
+]
+
 @dataclass
 class SessionConsoleLogEntry:
     time: float  # Unix timestamp (for pruning)

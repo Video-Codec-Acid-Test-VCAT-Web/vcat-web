@@ -517,6 +517,36 @@ function fetchAndUpdateTelemetry() {
 }
 
 function chartOptions(yLabel, latestTime, stepSize) {
+  const isCpuChart = yLabel === "CPU Usage (%)";
+
+  return {
+    responsive: true,
+    animation: false,
+    scales: {
+      x: {
+        type: 'linear',
+        min: 0,
+        max: latestTime + 60,
+        title: { display: true, text: 'Elapsed Time (s)' },
+        ticks: { stepSize: stepSize }
+      },
+      y: {
+        beginAtZero: true,
+        min: 0,
+        max: isCpuChart ? 100 : undefined, // ✅ only set max for CPU chart
+        title: { display: true, text: yLabel }
+      }
+    },
+    plugins: {
+      legend: { display: true }
+    }
+  };
+}
+
+
+function chartOptions(yLabel, latestTime, stepSize) {
+    
+  const isCpuChart = yLabel === "CPU Usage (%)";
   return {
     responsive: true,
     animation: false,
@@ -541,7 +571,8 @@ function chartOptions(yLabel, latestTime, stepSize) {
       y: {
         beginAtZero: true,
         title: { display: true, text: yLabel },
-        ticks: { precision: 0 }
+        ticks: { precision: 0 },
+        max: isCpuChart ? 100 : undefined, // ✅ only set max for CPU chart
       }
     },
     plugins: {

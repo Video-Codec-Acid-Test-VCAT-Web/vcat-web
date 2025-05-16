@@ -45,6 +45,7 @@ session_last_access: OrderedDict[str, float] = OrderedDict()
 session_last_poll: OrderedDict[str, float] = OrderedDict()
 
 session_thread_lock = threading.RLock()
+stop_event = threading.Event()
 
 max_console_lines = get_config_option(ConfigKey.MAX_CONSOLE_LINES)
 
@@ -213,12 +214,20 @@ def telemetry_worker():
 
     session_state : OrderedDict[str, bool] = OrderedDict()
 
-    while True:
+    while not stop_event.is_set():
         if not telemetry_dataset:
             logger.info("[Monitor] No devices left, stopping telemetry monitor")
             break
 
-        for device_id, telemetry_data in telemetry_dataset.items():
+        with session_thread_lock:
+            device_ids = list(telemetry_dataset.keys())
+
+        for device_id in device_ids:
+
+            with session_thread_lock:
+                telemetry_data = telemetry_dataset.get(device_id)
+                if telemetry_data  is None:
+                    continue;
 
             iteration_start_time = time.time()
 
@@ -235,7 +244,9 @@ def telemetry_worker():
             touch_session_poll(telemetry_data.owner_session_id)
 
             # is current connection stale?
-            last_access = session_last_access.get(device_id, 0)
+            with session_thread_lock:
+                last_access = session_last_access.get(device_id, 0)
+
             time_since_access = time.time() - last_access
 
             if time_since_access > session_idle_timeout:
@@ -399,7 +410,9 @@ def telemetry_worker():
                         [freq_row],
                     )
 
-        time.sleep(get_config_option(ConfigKey.TELEMETRY_LOOP_POLL_INTERVAL))
+        if stop_event.wait(timeout=get_config_option(ConfigKey.TELEMETRY_LOOP_POLL_INTERVAL)):
+            break
+
 
 
 def console_cleanup_loop():
@@ -459,35 +472,142 @@ def resetTelemetry(session_id, device_id):
 
     return telemetry_data
 
+class DeviceAccessException(Exception):
+    def __init__(self, message: str):
+        super().__init__(message)
 
 def get_device_info(
-    session_id: str, device_id: str, ip_addr: str
+    session_id: str, device_id: str
 ) -> Tuple[Optional[DeviceInfo], Optional[Response]]:
+
     if device_id in device_info_cache:
         return device_info_cache[device_id], None
 
+    def run_adb(cmd: List[str]) -> str:
+        full_cmd = ["adb", "-s", device_id] + cmd
+        output = vcat_adb.run_adb_command_with_log(session_id, device_id, full_cmd) or ""
+        return output
+
+        # Mapping of CPU part IDs to core types
+    CPU_PART_MAP = {
+        "0xd03": "Cortex-A53",
+        "0xd04": "Cortex-A35",
+        "0xd05": "Cortex-A55",
+        "0xd07": "Cortex-A57",
+        "0xd08": "Cortex-A72",
+        "0xd09": "Cortex-A73",
+        "0xd0a": "Cortex-A75",
+        "0xd0b": "Cortex-A76",
+        "0xd0c": "Neoverse-N1",
+        "0xd40": "Cortex-A78",
+        "0xd41": "Cortex-A78AE",
+        "0xd44": "Cortex-X1",
+        "0xd47": "Cortex-A710",
+        "0xd48": "Cortex-X2",
+        "0xd49": "Cortex-A510",
+        "0xd4a": "Cortex-A715",
+        "0xd4b": "Cortex-X3",
+        "0xd4c": "Cortex-A520",
+        "0xd4d": "Cortex-A720",
+        "0xd4e": "Cortex-X4",
+    }
+
     try:
-        response = vcat_http_proxy.get_device_http_response(
-            session_id, device_id, ip_addr, "/api/device_info"
-        )
+        def parse_wm_size(output: str) -> DisplayResolution:
+            if "Physical size:" not in output:
+                raise DeviceAccessException("Missing 'Physical size' in wm size output")
+            try:
+                _, size_str = output.split(":")
+                w, h = map(int, size_str.strip().split("x"))
+                return DisplayResolution(width=w, height=h)
+            except Exception as e:
+                raise DeviceAccessException(f"Failed to parse wm size: {e}")
 
-        if response is None or response.status_code != 200:
-            return None, response
+        def parse_meminfo(output: str) -> MemoryInfo:
+            total, available = None, None
+            for line in output.splitlines():
+                if line.startswith("MemTotal:"):
+                    total = line.split(":")[1].strip()
+                elif line.startswith("MemAvailable:"):
+                    available = line.split(":")[1].strip()
+            if not total or not available:
+                raise DeviceAccessException("Failed to parse /proc/meminfo")
+            return MemoryInfo(total=total, available=available)
 
-        data = response.get_json(force=True)
-        if data is None:
-            resp = jsonify({"error": "Device info response body is empty"})
-            resp.status_code = 500
-            return None, resp
+        def parse_cpuinfo(cpuinfo_output: str, cores: List[CoreInfo]):
+            for block in cpuinfo_output.strip().split("\n\n"):
+                lines = {
+                    k.strip(): v.strip()
+                    for line in block.strip().splitlines()
+                    if ":" in line
+                    for k, v in [line.split(":", 1)]
+                }
+                if "processor" in lines and "CPU part" in lines:
+                    cid = int(lines["processor"])
+                    part = lines["CPU part"].lower()
+                    part = part if part.startswith("0x") else f"0x{part}"
+                    core_type = CPU_PART_MAP.get(part, f"Unknown ({part})")
+                    for core in cores:
+                        if core.core_id == cid:
+                            core.core_type = core_type
+                            break
 
-        device_info = parse_device_info(data, ip_addr)
-        device_info_cache[device_id] = device_info
-        return device_info, None
 
-    except requests.RequestException as e:
-        return None, make_response(
-            jsonify({"error": f"Failed to fetch device info: {e}"}), 500
-        )
+        info = DeviceInfo()
+
+        info.manufacturer = run_adb(["shell", "getprop", "ro.product.manufacturer"])
+        info.model = run_adb(["shell", "getprop", "ro.product.model"])
+        info.android_version = run_adb(["shell", "getprop", "ro.build.version.release"])
+        info.soc_manufacturer = run_adb(["shell", "getprop", "ro.soc.manufacturer"])
+        info.soc = run_adb(["shell", "getprop", "ro.soc.model"])
+        info.cpu.architecture = run_adb(["shell", "getprop", "ro.product.cpu.abi"])
+
+        ip_output = run_adb(["shell", "ip", "addr", "show", "wlan0"])
+        for line in ip_output.splitlines():
+            if "inet " in line:
+                info.ip_addr = line.strip().split()[1].split("/")[0]
+                break
+
+        for i in range(32):
+            freq = run_adb(["shell", "cat", f"/sys/devices/system/cpu/cpu{i}/cpufreq/cpuinfo_max_freq"])
+            if freq.isdigit():
+                info.cpu.cores.append(CoreInfo(core_id=i, frequency_mhz=int(freq) // 1000))
+            else:
+                break
+
+        cpuinfo = run_adb(["shell", "cat", "/proc/cpuinfo"])
+        parse_cpuinfo(cpuinfo, info.cpu.cores)
+
+        wm_output = run_adb(["shell", "wm", "size"])
+        info.display_resolution = parse_wm_size(wm_output)
+
+        meminfo = run_adb(["shell", "cat", "/proc/meminfo"])
+        info.memory = parse_meminfo(meminfo)
+
+        df_output = run_adb(["shell", "df"])
+        found_data_line = False
+        for line in df_output.splitlines():
+            if "/data" in line:
+                parts = line.split()
+                if len(parts) >= 4:
+                    info.storage.total = parts[1]
+                    info.storage.available = parts[3]
+                    found_data_line = True
+                    break
+        if not found_data_line:
+            raise DeviceAccessException("Could not find /data line in df output")
+
+        device_info_cache[device_id] = info
+        return info, None
+
+    except DeviceAccessException as e:
+        logger.error(f"[DeviceAccessException] {e}")
+        response = make_response(jsonify({"error": str(e)}), 500)
+        return None, response
+    except Exception as e:
+        logger.exception("Unexpected error during device info collection")
+        response = make_response(jsonify({"error": "Internal server error"}), 500)
+        return None, response
 
 
 ##################################
@@ -662,8 +782,8 @@ device_info_cache: LRUCache[str, DeviceInfo] = LRUCache(10)
 def api_device_info(session_id, device_id):
 
     try:
-        ip_addr = get_required_ip_and_port(session_id, device_id)
-        device_info, error_response = get_device_info(session_id, device_id, ip_addr)
+
+        device_info, error_response = get_device_info(session_id, device_id)
         if error_response:
             return error_response
 
@@ -903,8 +1023,6 @@ def api_telemetry(session_id, device_id):
 @require_valid_session_and_device
 def api_start_device_monitor(session_id, device_id):
 
-    global console_thread
-
     if device_id in telemetry_dataset:
         return jsonify({"status": "already_monitored"}), 200
 
@@ -916,7 +1034,7 @@ def api_start_device_monitor(session_id, device_id):
     except ValueError as e:
         return jsonify({"error": str(e)}), 404
 
-    device_info, error_response = get_device_info(session_id, device_id, ip_addr)
+    device_info, error_response = get_device_info(session_id, device_id)
     if error_response:
         return error_response
 
@@ -932,6 +1050,7 @@ def api_start_device_monitor(session_id, device_id):
     create_telemetry_excel(telemetry_data)
 
     if vcat_adb.console_thread is None or not vcat_adb.console_thread.is_alive():
+        stop_event.clear()
         vcat_adb.console_thread = threading.Thread(target=telemetry_worker, daemon=True)
         vcat_adb.console_thread.start()
 
@@ -941,7 +1060,6 @@ def api_start_device_monitor(session_id, device_id):
 @app.route("/api/vcat_monitor/connected", methods=["GET"])
 @require_valid_session_and_device
 def api_is_connected(session_id, device_id):
-    global console_thread
 
     if device_id in telemetry_dataset:
         return jsonify({
@@ -961,12 +1079,16 @@ def api_stop_device_monitor(session_id, device_id):
 
     if not device_id in telemetry_dataset:
         logger.error(f"api/vcat_monitor/stop: device id '[{device_id}] not found")
-        return jsonify({"status": "not_found", "device_id": device_id}), 200
+        return jsonify({"status": "not_found", "device_id": device_id}), 202
 
     with session_thread_lock:
         telemetry_dataset.pop(device_id, None)
         session_last_access.pop(device_id, None)
         close_telemetry_excel(session_id)
+    
+        if not telemetry_dataset:
+            stop_event.set()
+
 
     logger.info(f"api/vcat_monitor/stop: executed for device id '[{device_id}] and session_id '[{session_id}]")
     return jsonify({"status": "monitoring_stopped", "device_id": device_id}), 200
@@ -1010,6 +1132,10 @@ def api_cpu(session_id, device_id):
 @app.route("/api/vcat_monitor/reset", methods=["POST"])
 @require_valid_session_and_device
 def api_vcat_monitor_reset(session_id, device_id):
+
+    with session_thread_lock:
+        if telemetry_dataset.get(device_id) is None:
+            return jsonify({f"status": "no telemetry session for device_id: [{device_id}]"}), 200
 
     resetTelemetry(session_id, device_id)
 
