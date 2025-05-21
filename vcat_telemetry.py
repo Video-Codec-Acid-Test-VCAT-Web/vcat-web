@@ -8,6 +8,7 @@ import sys
 import threading
 import time
 import uuid
+import re
 from collections import OrderedDict
 from dataclasses import asdict, dataclass, field, is_dataclass
 from datetime import datetime
@@ -565,7 +566,8 @@ def get_device_info(
         ip_output = run_adb(["shell", "ip", "addr", "show", "wlan0"])
         for line in ip_output.splitlines():
             if "inet " in line:
-                info.ip_addr = line.strip().split()[1].split("/")[0]
+                ip_addr = line.strip().split()[1].split("/")[0]
+                info.ip_addr = ip_addr if ip_addr else "<none>"
                 break
 
         for i in range(32):
@@ -653,6 +655,31 @@ def require_valid_session_and_device(func):
 
     return wrapper
 
+def require_valid_session_device_and_path(func):
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        session_id = request.args.get("session") or "<missing>"
+        device_id = request.args.get("device") or "<missing>"
+        path = request.args.get("path") or ""
+
+        if not vcat_adb.isSessionValid(session_id):
+            logger.error(
+                f"{func.__name__} called with invalid or missing session_id: [{session_id}]"
+            )
+            return jsonify({"error": "Invalid or missing session_id"}), 400
+
+        if not device_id:
+            logger.error(f"{func.__name__} called with invalid or missing device_id")
+            return jsonify({"error": "Invalid or missing device ID"}), 400
+
+        if not path.startswith("/sdcard/"):
+            logger.error(f"{func.__name__} called with invalid path: [{path}]")
+            return jsonify({"error": "Invalid or missing path"}), 400
+
+        vcat_adb.touchConsole(session_id)
+        return func(session_id, device_id, path, *args, **kwargs)
+
+    return wrapper
 
 def get_required_ip_and_port(session_id: str, device_id: str):
     ip_addr = vcat_adb.get_device_ip_and_port(session_id, device_id)
@@ -724,6 +751,47 @@ def api_reset_session_console_log(session_id):
 ##########################################
 # Device management
 ##########################################
+
+def is_vcat_running(session_id: str, device_id: str) -> bool:
+    package = "org.videolan.vcat"
+    cmd = ["adb", "-s", device_id, "shell", "pidof", package]
+    output = vcat_adb.run_adb_command_with_log(session_id, device_id, cmd)
+    return bool(output and output.strip())
+
+def launch_vcat(session_id: str, device_id: str) -> Tuple[bool, bool]:
+    """
+    Launches the VCAT app if it's not already running.
+
+    Returns:
+        (launched, already_running)
+    """
+    if is_vcat_running(session_id, device_id):
+        return False, True
+
+    package = "org.videolan.vcat"
+    cmd = ["adb", "-s", device_id, "shell", "monkey", "-p", package, "-c", "android.intent.category.LAUNCHER", "1"]
+    output = vcat_adb.run_adb_command_with_log(session_id, device_id, cmd)
+
+    success = bool(output and "Events injected: 1" in output)
+    return success, False
+
+
+@app.route('/api/device/vcat_running')
+@require_valid_session_and_device
+def vcat_running(session_id, device_id):
+    running = is_vcat_running(session_id, device_id)
+    return jsonify({"running": running})
+
+@app.route('/api/device/launch_vcat')
+@require_valid_session_and_device
+def launch_vcat_api(session_id, device_id):
+    launched, already_running = launch_vcat(session_id, device_id)
+    return jsonify({
+        "launched": launched,
+        "already_running": already_running
+    })
+
+
 
 @app.route('/api/device/ping')
 @require_valid_session_and_device
@@ -922,6 +990,74 @@ def api_enable_wireless_adb(session_id, device_id):
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+def get_files(session_id, device_id, path):
+        # Construct ADB command exactly as it would run in terminal
+    full_cmd = ["adb", "-s", device_id, "shell", f"ls {path}"]
+
+
+    output = vcat_adb.run_adb_command_with_log(
+        session_id=session_id,
+        device_id=device_id,
+        cmd=full_cmd,
+        log_level="debug"
+    )
+
+
+
+    # Split output into lines
+    filenames = [
+        line.strip()
+        for line in (output or "").splitlines()
+        if line.strip()
+    ]
+
+    return filenames
+
+
+@app.route("/api/device/files", methods=["GET"])
+@require_valid_session_device_and_path
+def api_device_files(session_id, device_id, path):
+
+    try:
+        filenames = get_files(session_id, device_id, path)
+
+        return jsonify(filenames)
+
+    except Exception as e:
+        app.logger.error(f"[{device_id}] Failed to list playlists in {path}: {e}")
+        return jsonify({"error": "Failed to list playlist files"}), 500
+
+@app.route("/api/device/test_results_files", methods=["GET"])
+@require_valid_session_device_and_path
+def api_device_test_results_files(session_id, device_id, path):
+
+    try:
+        filenames = get_files(session_id, device_id, path)
+
+        sorted_files = sorted(filenames, reverse=True)
+
+        file_entries = []
+
+        for path in sorted_files:
+            # Example: extract '1747269593728' from the filename
+            match = re.search(r'logs_(\d+)_infinite\.csv', path)
+            if match:
+                timestamp_ms = int(match.group(1))
+                dt = datetime.fromtimestamp(timestamp_ms / 1000.0)
+                display = dt.strftime("Test: %m/%d/%Y, %I:%M:%S %p")
+            else:
+                display = path  # fallback if pattern doesn't match
+
+            file_entries.append({
+                "path": path,
+                "display_name": display
+            })
+
+        return jsonify(file_entries)
+
+    except Exception as e:
+        app.logger.error(f"[{device_id}] Failed to list playlists in {path}: {e}")
+        return jsonify({"error": "Failed to list playlist files"}), 500
 
 ##########################################
 # Telemetry
@@ -1025,6 +1161,12 @@ def api_start_device_monitor(session_id, device_id):
 
     if device_id in telemetry_dataset:
         return jsonify({"status": "already_monitored"}), 200
+
+    if not is_vcat_running(session_id, device_id):
+        launched, already_running = launch_vcat(session_id, device_id)
+        if not launched and not already_running:
+            logger.error("Unable to launch VCAT")
+        time.sleep(.5)
 
     ip_addr = ""
 

@@ -13,64 +13,15 @@ const COLORS = [
 ];
 
 
-function populateDeviceDropdown() {
-    console.log("➡️ Calling populateDeviceDropdown with session_token =", session_token);
-
-    fetch(`${API_BASE}/api/all_connected_devices?session=${session_token}`)
-      .then(res => res.json())
-      .then(devices => {
-        console.log("📦 Device list:", devices);
-        const select = document.getElementById("device");
-        select.innerHTML = "";
-
-        devices.forEach(device => {
-          const opt = document.createElement("option");
-          opt.value = device;
-          opt.textContent = device;
-          select.appendChild(opt);
-        });
-
-          setTimeout(updateConsoleLog, 500);
-          handleDeviceSelection();
-      })
-      .catch(err => {
-        console.error("❌ Failed to fetch devices:", err);
-      });
-
-}
-
-// 👇 Fetch session ID first, then load devices
-window.addEventListener("DOMContentLoaded", () => {
-  fetch(`${API_BASE}/api/session_token`)
-    .then(res => res.json())
-    .then(data => {
-      session_token = data.session_token;
-      console.log("✅ Session Token:", session_token);
-      populateDeviceDropdown();
-    })
-    .catch(err => {
-      console.error("❌ Failed to get session Token:", err);
-    });
-});
 
 function fetchDeviceInfo(deviceId) {
-  fetch(`${API_BASE}/api/device/info?session=${session_token}&device=${deviceId}`)
-    .then(res => res.json())
-    .then(data => {
-      currentDeviceInfo = data;
-
-      // Capitalize manufacturer + model
-      const manufacturer = data.manufacturer.charAt(0).toUpperCase() + data.manufacturer.slice(1);
-      const model = data.model;
-      const summary = `Device: ${manufacturer} ${model}`;
-
-      const summaryEl = document.getElementById("device-summary");
-      if (summaryEl) summaryEl.textContent = summary;
-    })
-    .catch(err => {
-      console.error("❌ Failed to fetch device info:", err);
-    });
-}
+    return fetch(`${API_BASE}/api/device/info?session=${session_token}&device=${deviceId}`)
+      .then(res => res.json())
+      .catch(err => {
+        console.error("❌ Failed to fetch device info:", err);
+        return null;
+      });
+  }
 
 
 function waitForChartAndStartPolling() {
@@ -217,9 +168,6 @@ function updateConsoleLog() {
     });
 }
 
-function loadPlaylistFiles(deviceId) {
-    
-}
 
 function extractIpBase(raw) {
   if (!raw || typeof raw !== "string") return "—";
@@ -856,18 +804,21 @@ function updatePlayerControlsState() {
 
 function handleDeviceSelection() {
   const deviceSelect = document.getElementById("device");
-  const expandBtn = document.getElementById("expand-btn");
-  const selectedDeviceId = deviceSelect.value;
+  const selectedDeviceId = deviceSelect?.value;
 
-  const hasValidDevice = selectedDeviceId && deviceSelect.options.length > 0;
+  if (selectedDeviceId && deviceSelect.options.length > 0) {
+    updateDeviceTabLabel(selectedDeviceId);
 
-  if (hasValidDevice) {
-    expandBtn.style.display = "inline";
-    fetchDeviceInfo(selectedDeviceId);
-  } else {
-    expandBtn.style.display = "none";
+    fetchDeviceInfo(selectedDeviceId).then(info => {
+      if (info) {
+        populateDeviceInfo(info);
+        showTab("device");
+      }
+    });
   }
 }
+
+
 
 function pingDevice() {
     const deviceSelect = document.getElementById("device");
@@ -887,6 +838,192 @@ function pingDevice() {
         });
 }
 
+// Main JS logic for VCAT tabbed interface
+
+function showTab(tabName) {
+  document.getElementById("device-tab").style.display = (tabName === "device") ? "block" : "none";
+  document.getElementById("telemetry-tab").style.display = (tabName === "telemetry") ? "block" : "none";
+  document.getElementById("device-tab-btn").classList.toggle("active-tab", tabName === "device");
+  document.getElementById("telemetry-tab-btn").classList.toggle("active-tab", tabName === "telemetry");
+}
+
+function updateDeviceTabLabel(deviceName) {
+  const btn = document.getElementById("device-tab-btn");
+  if (btn) btn.textContent = deviceName || "Device";
+}
+
+function populateDeviceInfo(info) {
+  if (!info) {
+    document.getElementById("device-ip").textContent = "Unavailable";
+    return;
+  }
+
+  document.getElementById("device-ip").textContent = extractIpBase(info.ip_addr);
+
+  document.getElementById("device-display").textContent =
+    `${info.display_resolution.width}×${info.display_resolution.height}`;
+
+  document.getElementById("device-soc").textContent =
+    `${info.soc_manufacturer} ${info.soc}`;
+
+  document.getElementById("device-storage").textContent =
+    `${info.storage.total} / ${info.storage.available}`;
+
+  document.getElementById("device-memory").textContent =
+    `${info.memory.total} / ${info.memory.available}`;
+
+  const coreCounts = {};
+  Object.values(info.cpu.cores).forEach(core => {
+    const match = core.match(/Cortex-[A-Z0-9]+/);
+    const freqMatch = core.match(/(\\d+)\\s*MHz/);
+    if (match && freqMatch) {
+      const label = `${(parseInt(freqMatch[1]) / 1000).toFixed(1)} GHz ${match[0]}`;
+      coreCounts[label] = (coreCounts[label] || 0) + 1;
+    }
+  });
+
+  const coreLines = Object.entries(coreCounts)
+    .map(([label, count]) => `${count}×${label}`)
+    .join(", ");
+
+  document.getElementById("device-cpu").textContent = `ARMv8: ${coreLines}`;
+
+  loadPlaylistFiles(info.device_id);
+  loadTestResults(info.device_id)
+  updateConsoleLog();
+
+}
+
+function populateDeviceDropdown() {
+  console.log("➡️ Calling populateDeviceDropdown");
+
+  // Elements needed for visual fallback
+  const deviceSelect = document.getElementById("device");
+  const noDeviceOverlay = document.getElementById("no-device-overlay");
+  const tabContent = document.getElementById("tab-content");
+  const tabHeader = document.getElementById("tab-header");
+
+  // Get session token first
+  fetch(`${API_BASE}/api/session_token`)
+    .then(res => res.json())
+    .then(data => {
+      session_token = data.session_token;
+      console.log("✅ Session Token:", session_token);
+
+      return fetch(`${API_BASE}/api/all_connected_devices?session=${session_token}`);
+    })
+    .then(res => res.json())
+    .then(devices => {
+      console.log("📦 Device list:", devices);
+      deviceSelect.innerHTML = "";
+
+      // Remove any default placeholder option
+      const firstOption = deviceSelect.options[0];
+      if (firstOption && firstOption.disabled) {
+        deviceSelect.remove(0);
+      }
+
+      // Populate dropdown if devices are present
+      if (devices.length > 0) {
+        noDeviceOverlay.style.display = "none";
+        tabContent.style.display = "block";
+        tabHeader.style.display = "flex";
+
+        devices.forEach(deviceId => {
+          const opt = document.createElement("option");
+          opt.value = deviceId;
+          opt.textContent = deviceId;
+          deviceSelect.appendChild(opt);
+        });
+
+        // Bind handler once
+        deviceSelect.addEventListener("change", handleDeviceSelection);
+
+        // Auto-select first device
+        deviceSelect.value = devices[0];
+        handleDeviceSelection();
+
+        setTimeout(updateConsoleLog, 500);
+      } else {
+        console.warn("🚫 No connected devices found.");
+        noDeviceOverlay.style.display = "block";
+        tabContent.style.display = "none";
+        tabHeader.style.display = "none";
+      }
+    })
+    .catch(err => {
+      console.error("❌ Failed during device/session load:", err);
+      noDeviceOverlay.style.display = "block";
+      tabContent.style.display = "none";
+      tabHeader.style.display = "none";
+    });
+}
 
 
+window.addEventListener("DOMContentLoaded", populateDeviceDropdown);
 
+
+function loadPlaylistFiles() {
+  const deviceSelect = document.getElementById("device");
+  const selectedDeviceId = deviceSelect?.value;
+  if (!selectedDeviceId) return;
+
+    const path = "/sdcard/Vcat/*.xspf";
+    const url = `/api/device/files?session=${session_token}&device=${selectedDeviceId}&path=${encodeURIComponent(path)}`;
+
+  fetch(url)
+    .then(res => {
+      if (!res.ok) {
+        throw new Error(`Server returned ${res.status}`);
+      }
+      return res.json();
+    })
+    .then(files => {
+      const ul = document.getElementById("playlist-list");
+      ul.innerHTML = "";
+
+      files.forEach(name => {
+        const li = document.createElement("li");
+        li.textContent = name;
+        ul.appendChild(li);
+      });
+    })
+    .catch(err => {
+      console.error("Failed to load playlists:", err);
+      const ul = document.getElementById("playlist-list");
+      ul.innerHTML = "<li style='color: red;'>Failed to load playlists</li>";
+    });
+}
+
+function loadTestResults() {
+  const deviceSelect = document.getElementById("device");
+  const selectedDeviceId = deviceSelect?.value;
+  if (!selectedDeviceId) return;
+
+  const path = "/sdcard/bench_resources/logs_*_infinite.csv";
+  const url = `/api/device/test_results_files?session=${session_token}&device=${selectedDeviceId}&path=${encodeURIComponent(path)}`;
+
+  fetch(url)
+    .then(res => res.json())
+    .then(files => {
+      const ul = document.getElementById("test-results-list");
+      ul.innerHTML = "";
+
+      files.forEach(file => {
+        const li = document.createElement("li");
+        li.textContent = file.display_name;
+        li.dataset.path = file.path; // preserve full path for actions
+        li.style.cursor = "pointer";
+        li.onclick = () => {
+          console.log("Clicked:", file.path);
+          // trigger file open/view logic here
+        };
+        ul.appendChild(li);
+      });
+    })
+    .catch(err => {
+      console.error("Failed to load test results:", err);
+      document.getElementById("test-results-list").innerHTML =
+        "<li style='color: red;'>Failed to load test results</li>";
+    });
+}

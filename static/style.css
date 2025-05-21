@@ -274,12 +274,13 @@ body {
 
 .dashboard-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
-  gap: 32px;               /* ⬅️ increases spacing between charts */
-  padding: 0 40px;         /* ⬅️ left/right margin */
-  width: 100%;
+  grid-template-columns: repeat(auto-fill, minmax(380px, 1fr));
+  gap: 5px;
+  padding: 0 10px;
   box-sizing: border-box;
 }
+
+
 
 
 
@@ -415,6 +416,52 @@ fieldset.current-test-video input {
     border: none;
     font-size: 12px;
 }
+
+.tab-button {
+  padding: 8px 16px;
+  background: #333;
+  color: white;
+  border: 1px solid #888;
+  border-radius: 6px 6px 0 0;
+  cursor: pointer;
+}
+
+.tab-button.active-tab {
+  background: #555;
+  font-weight: bold;
+  border-bottom: none;
+}
+
+.tab-pane {
+  background: #1e1e1e;
+  padding: 20px;
+  border: 1px solid #888;
+  border-radius: 0 6px 6px 6px;
+}
+
+#tab-content {
+  overflow-y: visible;
+}
+
+
+.tab-pane {
+  height: 100%;
+  display: none;
+}
+
+.tab-pane.active {
+  display: block;
+}
+
+html, body {
+  margin: 0;
+  padding: 0;
+  height: auto;
+  min-height: 100%;
+  overflow-y: auto;
+  background: #FFA500; /* orange background */
+}
+
 
 
 

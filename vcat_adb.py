@@ -1,6 +1,7 @@
 from dataclasses import asdict, dataclass, field, is_dataclass
 from typing import Dict, List, Optional
 import re
+import os
 import threading
 from collections import OrderedDict
 import time
@@ -39,7 +40,7 @@ MAX_CONSOLE_LINES = 500
 
 
 BROADCAST_COMMANDS = {
-    "log_http_port": "org.videolan.vlcbenchmark.ADB_LOG_HTTP_INFO",
+    "log_http_port": "org.videolan.vcat.ADB_LOG_HTTP_INFO",
 }
 
 
@@ -106,8 +107,8 @@ def run_adb_command_with_log(
 
     except subprocess.CalledProcessError as e:
         error_msg = e.stderr.strip() if e.stderr else str(e)
-        if log_level != "debug" or session_id in session_consoles:
-            log_console_entry(session_id, f"$ {' '.join(cmd)}\n[ERR] {error_msg}")
+        log_console_entry(session_id, f"$ {' '.join(cmd)}\n[ERR] {error_msg}")
+        logger.error(error_msg);
         return None
 
 

@@ -1,0 +1,368 @@
+<!DOCTYPE html>
+<html>
+   <head>
+      <title>VCAT Remote Monitor</title>
+      <link href="/static/style.css" rel="stylesheet"/>
+      <link href="/static/favicon.png" rel="icon" type="image/x-icon"/>
+      <script defer="" src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+      <script defer="" src="https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@2.0.1/dist/chartjs-plugin-zoom.min.js"></script>
+      <script defer="" src="/static/main.js"></script>
+   </head>
+   <body>
+       
+       <!-- Combined layout: device on left, header centered -->
+       <div class="main-content" style="display: flex; justify-content: space-between; align-items: flex-start; margin-top: 20px; padding: 0 40px;">
+         <!-- Device panel on the left -->
+         <div id="device-wrapper" style="font-family: sans-serif; width: 600px; min-width: 400px;">
+           <fieldset style="border: 1px solid #888; border-radius: 6px; margin-bottom: 20px; padding: 10px 14px; width: 100%;">
+             <legend style="padding: 0 6px; font-weight: bold; color: white; text-align: left;">Device</legend>
+
+             <div style="text-align: left; margin-bottom: 6px;">
+               <label for="device" style="font-weight: bold;">Select device:</label>
+             </div>
+
+             <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 10px; padding-left: 8px;">
+               <select id="device" style="min-width: 200px;">
+                 <option disabled selected>Loading devices...</option>
+               </select>
+
+               <strong id="device-summary">Device:</strong>
+               <img alt="Device Info" id="expand-btn" onclick="openDeviceModal(event)" src="/static/btn_expand.png"
+                    style="width: 24px; height: 24px; cursor: pointer; display: none;" title="Device Info"/>
+
+             </div>
+
+             <div style="display: flex; align-items: center; gap: 10px; padding-left: 8px; margin-top: 8px;">
+               <img alt="Connect" id="connect-btn" onclick="handleConnectClick()" src="/static/btn_connect_device.png"
+                    style="width: 40px; height: 40px; cursor: pointer;" title="Connect"/>
+               <img alt="Run Config" id="run-config-btn" onclick="openRunConfigModal()" src="/static/btn_run_config.png"
+                    style="width: 40px; height: 40px; cursor: pointer;" title="Run Config"/>
+               <img alt="Console" id="console-btn" onclick="openConsoleModal()" src="/static/btn_console.png"
+                    style="width: 40px; height: 40px; cursor: pointer;" title="Open Console"/>
+               <img alt="Reset Telemetry" id="reset-telemetry-btn" onclick="openResetModal()" src="/static/btn_reset_telemetry.png"
+                    style="width: 40px; height: 40px; cursor: pointer;" title="Reset Telemetry"/>
+             </div>
+           </fieldset>
+         </div>
+
+
+         <!-- Header absolutely positioned at center -->
+         <div class="header" style="
+           position: absolute;
+           left: 50%;
+           top: 20px;
+           transform: translateX(0);
+           display: flex;
+           align-items: center;
+           gap: 20px;
+         ">
+           <img src="/static/VCAT_Logo_tnsp.png" alt="VCAT Logo" class="logo" style="height: 120px; width: auto;" />
+           <div class="title-text">
+             <h1 style="font-size: 48px; font-weight: bold; margin: 0;">VCAT</h1>
+             <p class="subtitle" style="font-size: 18px; margin: 5px 0 0 0; color: #f2f2f2;">Remote Monitor</p>
+           </div>
+         </div>
+
+       </div>
+
+            <div class="dashboard-grid">
+               <!-- ✅ Test Details -->
+               <div class="chart-wrapper" style="background: black; color: white; display: flex; flex-direction: column;">
+                 
+                 <!-- Top content in a wrapper with flex-grow -->
+                 <div class="test-details-top" style="flex: 1;">
+                   <h3>Test Details</h3>
+                   
+                   <div style="display: flex; gap: 8px; margin-bottom: 6px;">
+                     <label for="test-state">State:</label>
+                     <input id="test-state" readonly style="flex: 1; background: black; color: white; border: none;" />
+                   </div>
+                   <div style="display: flex; gap: 8px; margin-bottom: 6px;">
+                     <label for="test-start-time">Start Time:</label>
+                     <input id="test-start-time" readonly style="flex: 1; background: black; color: white; border: none;" />
+                   </div>
+
+                   <div style="display: flex; gap: 8px; margin-bottom: 6px;">
+                     <label for="test-playlist">Playlist:</label>
+                     <input id="test-playlist" readonly style="flex: 1; background: black; color: white; border: none;" />
+                   </div>
+
+                   <fieldset class="current-test-video">
+                     <legend>Current Test Video</legend>
+
+                     <div class="test-video-grid">
+
+                       <!-- Left Column -->
+                       <div class="test-video-column left-column">
+                         <div class="test-video-row">
+                           <label for="current-start-time">Start:</label>
+                           <input id="current-start-time" readonly />
+                         </div>
+
+                         <div class="test-video-row">
+                           <label for="test-file">File:</label>
+                           <input id="test-file" readonly />
+                         </div>
+
+                         <div class="test-video-row">
+                           <label for="test-codec">Codec:</label>
+                           <input id="test-codec" readonly />
+                         </div>
+
+                         <div class="test-video-row">
+                           <label for="test-decoder">Decoder:</label>
+                           <input id="test-decoder" readonly />
+                         </div>
+                       </div>
+
+                       <!-- Right Column -->
+                       <div class="test-video-column right-column">
+                         <div class="test-video-row">
+                           <label for="test-resolution">Resolution:</label>
+                           <input id="test-resolution" readonly />
+                         </div>
+
+                         <div class="test-video-row">
+                           <label for="test-mimetype">Mime Type:</label>
+                           <input id="test-mimetype" readonly />
+                         </div>
+
+                         <div class="test-video-row">
+                           <label for="test-bitrate">Bitrate:</label>
+                           <input id="test-bitrate" readonly />
+                         </div>
+
+                         <div class="test-video-row">
+                           <label for="test-framerate">Frame Rate:</label>
+                           <input id="test-framerate" readonly />
+                         </div>
+                       </div>
+
+                     </div>
+                   </fieldset>
+
+                   
+                 </div>
+
+                 <!-- 🔘 Player Controls aligned to bottom -->
+                 <div id="player-controls" style="
+                   margin-top: auto;
+                   display: flex;
+                   justify-content: center;
+                   gap: 16px;
+                   background: #111;
+                   padding: 10px 20px;
+                   border-radius: 8px;
+                   border: 1px solid #555;
+                 ">
+                     <img id="btn-play-pause" src="/static/btn_play_pause.png" alt="Play/Pause" title="Play or Pause Video"
+                          style="width: 36px; height: 36px; cursor: not-allowed; opacity: 0.4; pointer-events: none;"
+                          onclick="sendControlCommand('play_pause')" />
+
+                     <img id="btn-video-stats" src="/static/btn_video_stats.png" alt="Video Stats" title="Show Video Stats"
+                          style="width: 36px; height: 36px; cursor: not-allowed; opacity: 0.4; pointer-events: none;"
+                          onclick="sendControlCommand('show_stats')" />
+
+                     <img id="btn-stop-test" src="/static/btn_stop_test.png" alt="Stop Test" title="Stop the Test"
+                          style="width: 36px; height: 36px; cursor: not-allowed; opacity: 0.4; pointer-events: none;"
+                          onclick="sendControlCommand('stop')" />
+
+                 </div>
+
+               </div>
+
+               <!-- 📊 Graphs -->
+               <div class="chart-wrapper">
+                  <h3>CPU Usage (%)</h3>
+                  <canvas id="cpuChart"></canvas>
+               </div>
+               <div class="chart-wrapper">
+                  <h3>CPU Frequency (MHz)</h3>
+                  <canvas id="freqChart"></canvas>
+               </div>
+               <div class="chart-wrapper">
+                  <h3>Memory Usage (MB)</h3>
+                  <canvas id="memoryChart"></canvas>
+               </div>
+               <div class="chart-wrapper">
+                  <h3>Frame Drops</h3>
+                  <canvas id="frameDropChart"></canvas>
+               </div>
+               <div class="chart-wrapper">
+                  <h3>Battery Level</h3>
+                  <canvas id="batteryChart"></canvas>
+               </div>
+            </div>
+         </div>
+      </div>
+      
+
+      <div id="run-config-modal" class="modal-overlay">
+        <div class="modal-content" id="run-config-modal-content" style="
+          background: #222;
+          color: white;
+          border: 2px solid #ff8c1a;
+          border-radius: 8px;
+          padding: 20px;
+          width: 600px;
+          position: absolute;
+          z-index: 1000;
+          box-shadow: 0 0 12px rgba(0, 0, 0, 0.6);
+        ">
+          <span class="modal-close" onclick="closeRunConfigModal()" style="
+            position: absolute;
+            top: 8px;
+            right: 12px;
+            cursor: pointer;
+            font-size: 20px;
+            font-weight: bold;
+          ">×</span>
+
+          <div id="run-config-body">
+            <div style="margin-bottom: 16px;">
+              <label for="brightnessSlider">Screen Brightness: <span id="brightnessValue">50</span>%</label><br>
+              <input type="range" id="brightnessSlider" min="0" max="100" value="50" oninput="document.getElementById('brightnessValue').textContent = this.value">
+            </div>
+
+            <div style="margin-bottom: 16px;">
+              <label for="threadsSelect">Threads:</label><br>
+              <select id="threadsSelect">
+                <option value="1">1</option>
+                <option value="2" selected>2</option>
+                <option value="4">4</option>
+                <option value="8">8</option>
+              </select>
+            </div>
+
+            <div style="margin-bottom: 16px;">
+              <label>Run Mode:</label><br>
+              <input type="radio" id="modeOnce" name="runMode" value="ONCE">
+              <label for="modeOnce">Once</label>
+              <input type="radio" id="modeBattery" name="runMode" value="BATTERY" checked>
+              <label for="modeBattery">Battery %</label>
+              <input type="radio" id="modeTime" name="runMode" value="TIME">
+              <label for="modeTime">Time</label>
+            </div>
+
+            <div style="margin-bottom: 16px;">
+              <label for="runLimitInput">Run Limit:</label><br>
+              <input type="number" id="runLimitInput" value="15" min="1" max="100">
+            </div>
+
+            <div style="margin-bottom: 16px;">
+              <input type="checkbox" id="vlcControlsCheckbox">
+              <label for="vlcControlsCheckbox">Show VLC Controls</label>
+            </div>
+
+            <div style="margin-bottom: 16px;">
+              <label>Decoder Config:</label>
+              <pre id="decoderConfigText" style="background:#111; color:#0f0; padding:10px; border-radius:4px; font-size:13px;">Loading...</pre>
+            </div>
+
+            <div style="text-align: right;">
+              <button onclick="saveRunConfig()">Save</button>
+              <button onclick="closeRunConfigModal()">Cancel</button>
+            </div>
+          </div>
+        </div>
+      </div>
+      
+      <div id="console-modal" class="console-float" style="display: none;">
+        <div id="console-modal-header" class="modal-header">
+          Console
+          <span class="modal-close" onclick="closeConsoleModal()">×</span>
+        </div>
+        <pre id="console-full" class="console-body">
+        </pre>
+      </div>
+      
+      <div id="reset-modal" class="modal-overlay">
+        <div class="modal-content" style="background: #222; color: white; padding: 20px; border: 2px solid #ff8c1a; border-radius: 8px;">
+          <h3>Confirm Reset</h3>
+          <p>Are you sure you want to reset telemetry?</p>
+          <div style="margin-top: 20px; text-align: right;">
+            <button onclick="confirmResetTelemetry()" style="background: #ff6600; color: white; padding: 8px 16px; border: none; border-radius: 6px; margin-right: 10px;">Yes</button>
+            <button onclick="closeResetModal()" style="padding: 8px 16px; border: none; border-radius: 6px;">Cancel</button>
+          </div>
+        </div>
+      </div>
+      
+      <div id="wireless-modal" class="modal-overlay">
+        <div class="modal-content" style="max-width: 400px;">
+          <h3>Switch to Wireless Debugging?</h3>
+          <p>
+            Switching to wireless debugging will reset all telemetry.<br>
+            Are you sure you want to continue?
+          </p>
+          <div style="text-align: right; margin-top: 20px;">
+            <button onclick="confirmWirelessAdb()" style="margin-right: 10px;">Yes</button>
+            <button onclick="closeWirelessModal()">Cancel</button>
+          </div>
+        </div>
+      </div>
+
+      <div id="device-modal" class="modal-overlay" style="display: none;">
+        <div class="modal-content" id="device-modal-content">
+          <span class="modal-close" onclick="closeDeviceModal()">×</span>
+
+          <h3>Device Details</h3>
+          <div style="display: flex; gap: 20px; align-items: flex-start;">
+            <!-- Device Info with Border -->
+            <div id="device-details" style="flex: 1; border: 1px solid #888; padding: 10px; border-radius: 6px;">
+              <div>
+                <strong>IP:</strong>
+                <span id="device-ip">—</span>
+                <img
+                  id="ping-btn"
+                  src="/static/btn_ping.png"
+                  title="Ping Device"
+                  alt="Ping"
+                  onclick="pingDevice()"
+                  style="width: 30px; height: 30px; margin-left: 6px; cursor: pointer; vertical-align: middle;"
+                />
+              </div>
+
+              <div><strong>Display:</strong> <span id="device-display">—</span></div>
+              <div><strong>SoC:</strong> <span id="device-soc">—</span></div>
+              <div><strong>CPU:</strong> <span id="device-cpu">—</span></div>
+              <div><strong>Storage:</strong> <span id="device-storage">—</span></div>
+              <div><strong>Memory:</strong> <span id="device-memory">—</span></div>
+            </div>
+
+            <!-- Playlist Box -->
+            <div style="width: 300px;">
+      
+            </div>
+          </div>
+          <!-- Embedded Console Window -->
+          <div id="device-console-embedded" style="
+            margin-top: 20px;
+            border: 1px solid #888;
+            border-radius: 6px;
+            background: black;
+            color: white;
+            font-family: monospace;
+            font-size: 13px;
+            overflow: hidden;
+          ">
+            <div class="modal-header" style="padding: 8px 12px; border-bottom: 1px solid #444;">
+              Console
+            </div>
+            <pre id="device-console-body" class="console-body" style="
+              margin: 0;
+              padding: 10px;
+              height: 300px;
+              overflow-y: auto;
+              white-space: pre-wrap;
+            "></pre>
+          </div>
+
+
+        </div>
+        
+      </div>
+
+
+   </body>
+</html>
+
