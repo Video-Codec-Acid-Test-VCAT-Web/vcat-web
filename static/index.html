@@ -17,7 +17,7 @@
                 <legend style="padding: 0 6px; font-weight: bold; color: white; text-align: left;">Device</legend>
                 <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 10px; padding-left: 8px;"> <select id="device" style="min-width: 200px;">
                         <option disabled selected>Loading devices...</option>
-                    </select> <img alt="Connect" id="connect-btn" onclick="handleConnectClick()" src="/static/btn_connect_device.png" style="width: 40px; height: 40px; cursor: pointer;" title="Connect" /> </div>
+                    </select> <img alt="Connect" id="connect-btn" onclick="handleConnectClick('Live')" src="/static/btn_connect_device.png" style="width: 40px; height: 40px; cursor: pointer;" title="Connect" /> </div>
             </fieldset>
         </div>
         <!--device wrapper -->
@@ -38,7 +38,9 @@
         ">
 
         <div style="margin: 0 20px;">
-            <div id="tab-header"> <button id="device-tab-btn" class="tab-button active-tab" onclick="showTab('device')">Device</button> <button id="telemetry-tab-btn" class="tab-button" onclick="showTab('telemetry')">Telemetry</button> </div>
+            <div id="tab-header">
+                <button id="device-tab-btn" class="tab-button active-tab" onclick="showTab('device')">Device</button>
+            </div>
             <div id="no-device-overlay" style="
            padding: 40px;
            text-align: center;
@@ -112,148 +114,6 @@
                     </fieldset>
                 </div>
                 <!--device-tab-->
-                <div id="telemetry-tab" class="tab-pane" style="
-              display: none;
-              background: black;
-              padding: 20px 0;
-              overflow: visible;
-            ">
-                    <div id="telemetry-toolbar" style="
-                  display: flex;
-                  align-items: center;
-                  justify-content: space-between;
-                  background: #222;
-                  padding: 8px 16px;
-                  border-bottom: 1px solid #444;
-                  margin-bottom: 10px;
-                ">
-                        <!-- Left side: Connect + Reset -->
-                        <div style="display: flex; gap: 10px; align-items: center;"> <img alt="Reset Telemetry" id="reset-telemetry-btn" onclick="openResetModal()" src="/static/btn_reset_telemetry.png" style="width: 36px; height: 36px; cursor: pointer;" title="Reset Telemetry" /> </div> <!-- Right side: optional status -->
-                        <div id="telemetry-status" style="color: #ccc; font-size: 14px;">
-                            <!-- e.g. Connected to device XYZ -->
-                        </div>
-                    </div>
-                    <!--telemetry-toolbar-->
-                    <div class="dashboard-grid" style="
-                  display: grid;
-                  grid-template-columns: repeat(auto-fill, minmax(380px, 1fr));
-                  gap: 20px;
-                  padding: 10px;
-                  margin: 0 auto;
-                  max-width: calc(100% - 40px);
-                  box-sizing: border-box;
-                ">
-                        <div class="chart-wrapper" style="background: black; color: white; display: flex; flex-direction: column;">
-                            <div class="test-details-top" style="flex: 1;">
-                                <h3>Test Details</h3>
-                                <div style="display: flex; gap: 8px; margin-bottom: 6px;"> <label for="test-state">State:</label> <input id="test-state" readonly style="flex: 1; background: black; color: white; border: none;" /> </div>
-                                <!--display-->
-                                <div style="display: flex; gap: 8px; margin-bottom: 6px;"> <label for="test-start-time">Start Time:</label> <input id="test-start-time" readonly style="flex: 1; background: black; color: white; border: none;" /> </div>
-                                <!--display-->
-                                <div style="display: flex; gap: 8px; margin-bottom: 6px;"> <label for="test-playlist">Playlist:</label> <input id="test-playlist" readonly style="flex: 1; background: black; color: white; border: none;" /> </div>
-                                <!--display-->
-                                <fieldset class="current-test-video">
-                                    <legend>Current Test Video</legend>
-                                    <div class="test-video-grid">
-                                        <div class="test-video-column left-column">
-                                            <div class="test-video-row"> <label for="current-start-time">Start:</label> <input id="current-start-time" readonly /> </div>
-                                            <!--test-video-column-->
-                                            <div class="test-video-row"> <label for="test-file">File:</label> <input id="test-file" readonly />
-                                            </div>
-                                            <!--test-video-row-->
-                                            <div class="test-video-row"> <label for="test-codec">Codec:</label> <input id="test-codec" readonly />
-                                            </div>
-                                            <!--test-video-row-->
-                                            <div class="test-video-row"> <label for="test-decoder">Decoder:</label> <input id="test-decoder" readonly />
-                                            </div>
-                                            <!--test-video-row-->
-                                        </div>
-                                        <!--test-video-column left-column-->
-                                        <div class="test-video-column right-column">
-                                            <div class="test-video-row"> <label for="test-resolution">Resolution:</label> <input id="test-resolution" readonly />
-                                            </div>
-                                            <!--test-video-row-->
-                                            <div class="test-video-row"> <label for="test-mimetype">Mime Type:</label> <input id="test-mimetype" readonly />
-                                            </div>
-                                            <!--test-video-row-->
-                                            <div class="test-video-row"> <label for="test-bitrate">Bitrate:</label> <input id="test-bitrate" readonly />
-                                            </div>
-                                            <!--test-video-row-->
-                                            <div class="test-video-row"> <label for="test-framerate">Frame Rate:</label> <input id="test-framerate" readonly />
-                                            </div>
-                                            <!--test-video-row-->
-                                        </div>
-                                        <!--test-video-column right-column-->
-                                    </div>
-                                    <!--test-video-grid-->
-                                </fieldset>
-                                <!--current-test-video-->
-                            </div>
-                            <!--test-details-top-->
-                            <div id="player-controls" style="margin-top: auto; display: flex; justify-content: center; gap: 16px; background: #111; padding: 10px 20px; border-radius: 8px; border: 1px solid #555;"> <img id="btn-play-pause" src="/static/btn_play_pause.png" alt="Play/Pause" title="Play or Pause Video" style="width: 36px; height: 36px; cursor: not-allowed; opacity: 0.4; pointer-events: none;" onclick="sendControlCommand('play_pause')" /> <img id="btn-video-stats" src="/static/btn_video_stats.png" alt="Video Stats" title="Show Video Stats" style="width: 36px; height: 36px; cursor: not-allowed; opacity: 0.4; pointer-events: none;" onclick="sendControlCommand('show_stats')" /> <img id="btn-stop-test" src="/static/btn_stop_test.png" alt="Stop Test" title="Stop the Test" style="width: 36px; height: 36px; cursor: not-allowed; opacity: 0.4; pointer-events: none;" onclick="sendControlCommand('stop')" />
-                            </div>
-                            <!--player-controls-->
-                        </div>
-                        <!--chart-wrapper-->
-                        <div class="chart-wrapper" style="
-                          width: 100%;
-                          max-width: 98%;
-                          background: #111;
-                          border-radius: 8px;
-                          padding: 10px;
-                          box-sizing: border-box;
-                        ">
-
-                            <h3>CPU Usage (%)</h3><canvas id="cpuChart"></canvas>
-                        </div>
-                        <div class="chart-wrapper" style="
-                          width: 100%;
-                          max-width: 98%;
-                          background: #111;
-                          border-radius: 8px;
-                          padding: 10px;
-                          box-sizing: border-box;
-                        ">
-
-                            <h3>CPU Frequency (MHz)</h3><canvas id="freqChart"></canvas>
-                        </div>
-                        <div class="chart-wrapper" style="
-                          width: 100%;
-                          max-width: 98%;
-                          background: #111;
-                          border-radius: 8px;
-                          padding: 10px;
-                          box-sizing: border-box;
-                        ">
-
-                            <h3>Memory Usage (MB)</h3><canvas id="memoryChart"></canvas>
-                        </div>
-                        <div class="chart-wrapper" style="
-                          width: 100%;
-                          max-width: 98%;
-                          background: #111;
-                          border-radius: 8px;
-                          padding: 10px;
-                          box-sizing: border-box;
-                        ">
-
-                            <h3>Frame Drops</h3><canvas id="frameDropChart"></canvas>
-                        </div>
-                        <div class="chart-wrapper" style="
-                          width: 100%;
-                          max-width: 98%;
-                          background: #111;
-                          border-radius: 8px;
-                          padding: 10px;
-                          box-sizing: border-box;
-                        ">
-
-                            <h3>Battery Level</h3><canvas id="batteryChart"></canvas>
-                        </div>
-                    </div>
-                    <!--dashboard-grid-->
-                </div>
-                <!--telemetry-tab-->
             </div>
             <!--tab-content-->
         </div>
@@ -273,6 +133,98 @@
         <div id="wireless-modal" class="modal-overlay">
             <div class="modal-content"></div>
         </div>
+
+    <template id="telemetry-tab-template">
+        <div class="telemetry-toolbar" style="
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    background: #222;
+    padding: 8px 16px;
+    border-bottom: 1px solid #444;
+    margin-bottom: 10px;
+  ">
+            <div style="display: flex; gap: 10px; align-items: center;">
+                <img alt="Reset Telemetry" class="reset-telemetry-btn" onclick="openResetModal()" src="/static/btn_reset_telemetry.png" style="width: 36px; height: 36px; cursor: pointer;" title="Reset Telemetry" />
+            </div>
+            <div class="telemetry-status" style="color: #ccc; font-size: 14px;"></div>
+        </div>
+
+        <div class="dashboard-grid" style="
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(380px, 1fr));
+    gap: 20px;
+    padding: 10px;
+    margin: 0 auto;
+    max-width: calc(100% - 40px);
+    box-sizing: border-box;
+  ">
+            <div class="chart-wrapper" style="background: black; color: white; display: flex; flex-direction: column;">
+                <div class="test-details-top" style="flex: 1;">
+                    <h3>Test Details</h3>
+
+                    <div style="display: flex; gap: 8px; margin-bottom: 6px;">
+                        <label>State:</label> <input class="test-state" readonly />
+                    </div>
+                    <div style="display: flex; gap: 8px; margin-bottom: 6px;">
+                        <label>Start Time:</label> <input class="test-start-time" readonly />
+                    </div>
+                    <div style="display: flex; gap: 8px; margin-bottom: 6px;">
+                        <label>Playlist:</label> <input class="test-playlist" readonly />
+                    </div>
+
+                    <fieldset class="current-test-video">
+                        <legend>Current Test Video</legend>
+                        <div class="test-video-grid">
+                            <div class="test-video-column left-column">
+                                <div class="test-video-row"><label>Start:</label> <input class="current-start-time" readonly /></div>
+                                <div class="test-video-row"><label>File:</label> <input class="test-file" readonly /></div>
+                                <div class="test-video-row"><label>Codec:</label> <input class="test-codec" readonly /></div>
+                                <div class="test-video-row"><label>Decoder:</label> <input class="test-decoder" readonly /></div>
+                            </div>
+                            <div class="test-video-column right-column">
+                                <div class="test-video-row"><label>Resolution:</label> <input class="test-resolution" readonly /></div>
+                                <div class="test-video-row"><label>Mime Type:</label> <input class="test-mimetype" readonly /></div>
+                                <div class="test-video-row"><label>Bitrate:</label> <input class="test-bitrate" readonly /></div>
+                                <div class="test-video-row"><label>Frame Rate:</label> <input class="test-framerate" readonly /></div>
+                            </div>
+                        </div>
+                    </fieldset>
+                </div>
+
+                <div class="player-controls" style="margin-top: auto; display: flex; justify-content: center; gap: 16px; background: #111; padding: 10px 20px; border-radius: 8px; border: 1px solid #555;">
+                    <img src="/static/btn_play_pause.png" alt="Play/Pause" title="Play or Pause Video" class="btn-play-pause" style="width: 36px; height: 36px; cursor: not-allowed; opacity: 0.4; pointer-events: none;" onclick="sendControlCommand('play_pause')" />
+                    <img src="/static/btn_video_stats.png" alt="Video Stats" title="Show Video Stats" class="btn-video-stats" style="width: 36px; height: 36px; cursor: not-allowed; opacity: 0.4; pointer-events: none;" onclick="sendControlCommand('show_stats')" />
+                    <img src="/static/btn_stop_test.png" alt="Stop Test" title="Stop the Test" class="btn-stop-test" style="width: 36px; height: 36px; cursor: not-allowed; opacity: 0.4; pointer-events: none;" onclick="sendControlCommand('stop')" />
+                </div>
+            </div>
+
+            <!-- Chart Areas -->
+            <div class="chart-wrapper">
+                <h3>CPU Usage (%)</h3>
+                <canvas class="cpuChart" id="telemetry-cpuChart"></canvas>
+            </div>
+            <div class="chart-wrapper">
+                <h3>CPU Frequency (MHz)</h3>
+                <canvas class="freqChart" id="telemetry-freqChart"></canvas>
+            </div>
+            <div class="chart-wrapper">
+                <h3>Memory Usage (MB)</h3>
+                <canvas class="memoryChart" id="telemetry-memoryChart"></canvas>
+            </div>
+            <div class="chart-wrapper">
+                <h3>Frame Drops</h3>
+                <canvas class="frameDropChart" id="telemetry-frameDropChart"></canvas>
+            </div>
+            <div class="chart-wrapper">
+                <h3>Battery Level</h3>
+                <canvas class="batteryChart" id="telemetry-batteryChart"></canvas>
+            </div>
+
+        </div>
+    </template>
+
+
 </body>
 
 </html>

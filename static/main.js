@@ -3,6 +3,9 @@ let session_token = null;
 let selectedDevice = null;
 let currentDeviceInfo = null;
 
+const chartsByTabId = {};
+
+
 
 const COLORS = [
   '#e6194b', '#3cb44b', '#ffe119', '#4363d8',
@@ -25,13 +28,19 @@ function fetchDeviceInfo(deviceId) {
 
 
 function waitForChartAndStartPolling() {
-    if (typeof Chart !== 'undefined') {
-    fetchAndUpdateTelemetry(); // First draw
+  const canvas = document.getElementById("telemetry-cpuChart");
+  const canvasReady = canvas && canvas.getContext;
+
+  if (typeof Chart !== 'undefined' && canvasReady) {
+    console.log("✅ Chart.js and canvas ready — starting polling");
+    fetchAndUpdateTelemetry(); // Initial draw
     window.telemetryInterval = setInterval(fetchAndUpdateTelemetry, 30000);
   } else {
-    setTimeout(waitForChartAndStartPolling, 100); // Try again in 100ms
+    console.log("⏳ Waiting for Chart.js and canvas...");
+    setTimeout(waitForChartAndStartPolling, 100); // Retry every 100ms
   }
 }
+
 
 
 async function setDeviceConnectionState() {
@@ -83,37 +92,175 @@ async function setDeviceConnectionState() {
 
 
 
-function handleConnectClick() {
+function handleConnectClick(source) {
+  const isLive = source === "Live";
+  const filePath = isLive ? null : source;
+
   const deviceId = document.getElementById("device").value;
   if (!deviceId) return alert("Select a device first.");
-
   selectedDevice = deviceId;
 
-  // Start telemetry polling if not already running
-  if (!window.telemetryInterval) {
-    waitForChartAndStartPolling();
+  // Safe tab ID generation
+  let tabId, tabLabel;
+  if (isLive) {
+    tabId = "telemetry";
+    tabLabel = "Live Session";
+  } else {
+    const fileName = filePath.split("/").pop();
+    tabLabel = fileName;
+    tabId = "telemetry-" + fileName.replace(/[^a-zA-Z0-9_-]/g, "-");
   }
 
-  fetchDeviceInfo(deviceId);
+  // Create tab button if needed
+  if (!document.getElementById(`${tabId}-tab-btn`)) {
+    const tabHeader = document.getElementById("tab-header");
 
-  fetch(`${API_BASE}/api/vcat_monitor/start?session=${session_token}&device=${deviceId}`, {
-    method: "POST"
-  })
-    .then(res => {
-      if (!res.ok) throw new Error("Failed to start telemetry");
-      console.log("🚀 Telemetry started");
-      setTimeout(updateConsoleLog, 500);
-      // Update the connection state externally
-      setDeviceConnectionState();
-    })
-    .catch(err => {
-      console.error("❌ Telemetry start failed:", err);
-      const button = document.getElementById("connect-btn");
-      button.disabled = true;
-      button.style.opacity = "0.5";
-      button.style.cursor = "not-allowed";
+    const tabButton = document.createElement("button");
+    tabButton.id = `${tabId}-tab-btn`;
+    tabButton.className = "tab-button";
+    tabButton.textContent = tabLabel;
+    tabButton.onclick = () => showTab(tabId);
+
+    tabHeader.appendChild(tabButton);
+  }
+
+  // Create tab pane if needed
+  if (!document.getElementById(`${tabId}-tab`)) {
+    const tabContent = document.getElementById("tab-content");
+
+    const tabPane = document.createElement("div");
+    tabPane.id = `${tabId}-tab`;
+    tabPane.className = "tab-pane";
+    tabPane.style.display = "none";
+
+    tabContent.appendChild(tabPane);
+
+    // ✅ Inject cloned template layout
+    setupTelemetryCanvas(tabId);
+  }
+
+
+  function setupTelemetryCanvas(tabId) {
+    const tabPane = document.getElementById(`${tabId}-tab`);
+    if (!tabPane) return;
+
+    // 🛡️ Don't inject template again if already present
+    if (tabPane.querySelector("canvas.cpuChart")) {
+      console.log(`⚠️ setupTelemetryCanvas already ran for ${tabId}`);
+      return;
+    }
+
+    const template = document.getElementById("telemetry-tab-template");
+    if (!template) {
+      console.error("❌ Missing template #telemetry-tab-template");
+      return;
+    }
+
+    const clone = template.content.cloneNode(true);
+
+    // Optionally add unique IDs to canvases
+    clone.querySelectorAll("canvas[class]").forEach(canvas => {
+      canvas.id = `${tabId}-${canvas.className}`; // e.g. telemetry123-cpuChart
     });
+
+    tabPane.appendChild(clone);
+    console.log(`✅ Injected telemetry layout into ${tabId}`);
+  }
+
+
+
+
+  // Create tab content pane if needed
+  if (!document.getElementById(`${tabId}-tab`)) {
+    const tabContent = document.getElementById("tab-content");
+    const tabPane = document.createElement("div");
+    tabPane.id = `${tabId}-tab`;
+    tabPane.className = "tab-pane";
+    tabPane.style.display = "none";
+    tabContent.appendChild(tabPane);
+  }
+
+  showTab(tabId);
+
+  if (isLive) {
+    // ✅ Live telemetry setup
+    if (!window.telemetryInterval) {
+      renderTelemetryTab("telemetry");
+      setTimeout(() => {
+        waitForChartAndStartPolling();  // ← now canvas is in DOM
+      }, 100);
+    }
+
+    fetchDeviceInfo(deviceId);
+
+    fetch(`${API_BASE}/api/vcat_monitor/start?session=${session_token}&device=${deviceId}`, {
+      method: "POST"
+    })
+        .then(res => {
+          if (!res.ok) throw new Error("Failed to start telemetry");
+          console.log("🚀 Telemetry started");
+          setTimeout(updateConsoleLog, 500);
+          setDeviceConnectionState();
+        })
+        .catch(err => {
+          console.error("❌ Telemetry start failed:", err);
+          const button = document.getElementById("connect-btn");
+          button.disabled = true;
+          button.style.opacity = "0.5";
+          button.style.cursor = "not-allowed";
+        });
+  } else {
+    // ✅ Static file-based telemetry
+    const url = `/api/vcat_monitor/telemetry_from_file?session=${session_token}&device=${deviceId}&file_path=${encodeURIComponent(filePath)}`;
+
+    fetch(url)
+        .then(res => res.json())
+        .then(data => {
+          setupTelemetryCanvas(tabId);
+          const telemetry = data.telemetry_data;
+          const testDetails = data.test_details;
+
+          if (testDetails) {
+            updateTestDetailsUI({ test_details: testDetails },tabId);
+          }
+
+          updateCpuChart(telemetry, `${tabId}-cpuChart`, tabId);
+          updateBatteryChart(telemetry, `${tabId}-batteryChart`, tabId);
+          updateFreqChart(telemetry, `${tabId}-freqChart`, tabId);
+          updateMemoryChart(telemetry, `${tabId}-memoryChart`, tabId);
+          updateFrameDropChart(telemetry, `${tabId}-frameDropChart`, tabId);
+        })
+        .catch(err => {
+          console.error("❌ Failed to load telemetry from file:", err);
+        });
+  }
 }
+
+function renderTelemetryTab(tabId) {
+  const template = document.getElementById("telemetry-tab-template");
+  const clone = template.content.cloneNode(true);
+
+  // Fix up all canvas and input IDs to be prefixed with tabId
+  clone.querySelectorAll("[id]").forEach(el => {
+    el.id = `${tabId}-${el.id}`;
+  });
+
+  clone.querySelectorAll("[class]").forEach(el => {
+    el.classList.forEach(cls => {
+      if (cls.startsWith("cpuChart") || cls.endsWith("Chart") || cls.startsWith("test-") || cls.startsWith("btn-")) {
+        el.id = `${tabId}-${cls}`;
+      }
+    });
+  });
+
+  const tabPane = document.createElement("div");
+  tabPane.id = `${tabId}-tab`;
+  tabPane.className = "tab-pane";
+  tabPane.appendChild(clone);
+
+  document.getElementById("tab-content").appendChild(tabPane);
+}
+
 
 function handleDisconnectClick() {
   const deviceId = document.getElementById("device").value;
@@ -328,14 +475,14 @@ function updateChart(chartRef, canvasId, datasets, labels, yLabel, latestTime, s
   return chartRef;
 }
 
-function updateBatteryChart(telemetry) {
+function updateBatteryChart(telemetry, chartId) {
   const battery = telemetry.battery || [];
   const labels = battery.map(p => p.elapsed_time);
   const data = battery.map(p => p.level);
   const stepSize = computeStepSize(labels.at(-1) || 0);
   batteryChart = updateChart(
     batteryChart,
-    'batteryChart',
+    chartId,
     [{ label: 'Battery Level (%)', data, borderWidth: 2 }],
     labels,
     'Battery Level (%)',
@@ -344,16 +491,16 @@ function updateBatteryChart(telemetry) {
   );
 }
 
-function updateCpuChart(telemetry) {
+function updateCpuChart(telemetry, chartId, tabId) {
   const cpu = telemetry.cpu_usage || [];
   const labels = cpu.map(p => p.elapsed_time);
   const stepSize = computeStepSize(labels.at(-1) || 0);
   const datasets = [];
 
-  const keys = Object.keys(cpu.at(-1) || {}).filter(k => k.startsWith('cpu'));
+  const keys = Object.keys(cpu.at(-1) || {}).filter(k => k.startsWith("cpu"));
   keys.forEach((key, i) => {
     datasets.push({
-      label: key === 'cpu' ? 'Total CPU (%)' : key,
+      label: key === "cpu" ? "Total CPU (%)" : key,
       data: cpu.map(p => p[key] ?? null),
       borderColor: COLORS[i % COLORS.length],
       backgroundColor: COLORS[i % COLORS.length],
@@ -362,10 +509,22 @@ function updateCpuChart(telemetry) {
       pointRadius: 0
     });
   });
-  cpuChart = updateChart(cpuChart, 'cpuChart', datasets, labels, 'CPU Usage (%)', labels.at(-1), stepSize);
+
+  // Create chart storage for this tab if needed
+  chartsByTabId[tabId] ||= {};
+  chartsByTabId[tabId].cpuChart = updateChart(
+      chartsByTabId[tabId].cpuChart,
+      chartId,
+      datasets,
+      labels,
+      "CPU Usage (%)",
+      labels.at(-1),
+      stepSize
+  );
 }
 
-function updateFreqChart(telemetry) {
+
+function updateFreqChart(telemetry, chartId) {
   const freq = telemetry.cpu_freq || [];
   const labels = freq.map(p => p.elapsed_time);
   const stepSize = computeStepSize(labels.at(-1) || 0);
@@ -381,10 +540,10 @@ function updateFreqChart(telemetry) {
       pointRadius: 0
     };
   });
-  freqChart = updateChart(freqChart, 'freqChart', datasets, labels, 'CPU Frequency (MHz)', labels.at(-1), stepSize);
+  freqChart = updateChart(freqChart, chartId, datasets, labels, 'CPU Frequency (MHz)', labels.at(-1), stepSize);
 }
 
-function updateMemoryChart(telemetry) {
+function updateMemoryChart(telemetry, chartId) {
   const system = telemetry.system_memory || [];
   const app = telemetry.app_memory || [];
   const labels = system.map(p => p.elapsed_time);
@@ -413,17 +572,17 @@ function updateMemoryChart(telemetry) {
       pointRadius: 0
     }
   ];
-  memoryChart = updateChart(memoryChart, 'memoryChart', datasets, labels, 'Memory Usage (MB)', labels.at(-1), stepSize);
+  memoryChart = updateChart(memoryChart, chartId, datasets, labels, 'Memory Usage (MB)', labels.at(-1), stepSize);
 }
 
-function updateFrameDropChart(telemetry) {
+function updateFrameDropChart(telemetry, chartId) {
   const drops = telemetry.frame_drops || [];
   const labels = drops.map(p => p.elapsed_time);
   const values = drops.map(p => p.delta_framedrops);
   const stepSize = computeStepSize(labels.at(-1) || 0);
   frameDropChart = updateChart(
     frameDropChart,
-    'frameDropChart',
+    chartId,
     [{ label: 'Frame Drops', data: values, borderWidth: 2 }],
     labels,
     'Dropped Frames',
@@ -451,14 +610,17 @@ function fetchAndUpdateTelemetry() {
       const telemetry = result.telemetry_data;
       const testDetails = result.test_details;
 
+      const tabId = "telemetry";
+
       if (testDetails) {
-          updateTestDetailsUI({ test_details: testDetails });
+          updateTestDetailsUI({ test_details: testDetails }, tabId);
       }
-      updateBatteryChart(telemetry);
-      updateCpuChart(telemetry);
-      updateFreqChart(telemetry);
-      updateMemoryChart(telemetry);
-      updateFrameDropChart(telemetry);
+
+      updateCpuChart(telemetry, `${tabId}-cpuChart`, tabId);
+      updateBatteryChart(telemetry, `${tabId}-batteryChart`, tabId);
+      updateFreqChart(telemetry, `${tabId}-freqChart`, tabId);
+      updateMemoryChart(telemetry, `${tabId}-memoryChart`, tabId);
+      updateFrameDropChart(telemetry, `${tabId}-frameDropChart`, tabId);
 
     })
     .catch(err => console.error('❌ Telemetry fetch failed:', err));
@@ -628,30 +790,32 @@ function handleRunConfigOutsideClick(event) {
   }
 }
 
-function updateTestDetailsUI(data) {
-    const details = data.test_details;
-    const curVideo = details.currentTestVideo;
-    // Top-level test info
-    document.getElementById("test-state").value = details.testState || "";
-    document.getElementById("test-start-time").value = details.startTime || "";
-    document.getElementById("test-playlist").value = details.playlist || "";
+function updateTestDetailsUI(data, tabId) {
+  const tabRoot = document.getElementById(`${tabId}-tab`);
+  if (!tabRoot || !data.test_details) return;
 
-    if (curVideo) {
-        // Current Test Video section
-        document.getElementById("current-start-time").value = curVideo.startTime || "";
-        document.getElementById("test-file").value = curVideo.fileName || "";
-        document.getElementById("test-codec").value = curVideo.videoCodec || "";
-        document.getElementById("test-decoder").value = curVideo.videoDecoder || "";
-        document.getElementById("test-resolution").value = curVideo.resolution || "";
-        document.getElementById("test-mimetype").value = curVideo.mimeType || "";
-        document.getElementById("test-bitrate").value = curVideo.bitrate || "";
-        document.getElementById("test-framerate").value =
-            (curVideo.framerate !== undefined) ? curVideo.framerate.toFixed(1) : "";
-    }
-    
-    document.getElementById("test-state").value = details.testState || "";
-    updatePlayerControlsState();  // 👈 Add this here
+  const details = data.test_details;
+  const curVideo = details.currentTestVideo;
+
+  // Top-level test info
+  tabRoot.querySelector(".test-state").value = details.testState || "";
+  tabRoot.querySelector(".test-start-time").value = details.startTime || "";
+  tabRoot.querySelector(".test-playlist").value = details.playlist || "";
+
+  if (curVideo) {
+    tabRoot.querySelector(".current-start-time").value = curVideo.startTime || "";
+    tabRoot.querySelector(".test-file").value = curVideo.fileName || "";
+    tabRoot.querySelector(".test-codec").value = curVideo.videoCodec || "";
+    tabRoot.querySelector(".test-decoder").value = curVideo.videoDecoder || "";
+    tabRoot.querySelector(".test-resolution").value = curVideo.resolution || "";
+    tabRoot.querySelector(".test-mimetype").value = curVideo.mimeType || "";
+    tabRoot.querySelector(".test-bitrate").value = curVideo.bitrate || "";
+    tabRoot.querySelector(".test-framerate").value =
+        (curVideo.framerate !== undefined) ? curVideo.framerate.toFixed(1) : "";
+  }
 }
+
+
 
 
 
@@ -840,12 +1004,19 @@ function pingDevice() {
 
 // Main JS logic for VCAT tabbed interface
 
-function showTab(tabName) {
-  document.getElementById("device-tab").style.display = (tabName === "device") ? "block" : "none";
-  document.getElementById("telemetry-tab").style.display = (tabName === "telemetry") ? "block" : "none";
-  document.getElementById("device-tab-btn").classList.toggle("active-tab", tabName === "device");
-  document.getElementById("telemetry-tab-btn").classList.toggle("active-tab", tabName === "telemetry");
+function showTab(tabId) {
+  const allTabs = document.querySelectorAll(".tab-pane");
+  allTabs.forEach(tab => tab.style.display = "none");
+
+  const tab = document.getElementById(`${tabId}-tab`);
+  if (tab) tab.style.display = "block";
+
+  // Update active tab button style
+  document.querySelectorAll(".tab-button").forEach(btn => btn.classList.remove("active-tab"));
+  const activeBtn = document.getElementById(`${tabId}-tab-btn`);
+  if (activeBtn) activeBtn.classList.add("active-tab");
 }
+
 
 function updateDeviceTabLabel(deviceName) {
   const btn = document.getElementById("device-tab-btn");
@@ -1000,7 +1171,7 @@ function loadTestResults() {
   const selectedDeviceId = deviceSelect?.value;
   if (!selectedDeviceId) return;
 
-  const path = "/sdcard/bench_resources/logs_*_infinite.csv";
+  const path = "/sdcard/vcat/test_results/logs_*.csv";
   const url = `/api/device/test_results_files?session=${session_token}&device=${selectedDeviceId}&path=${encodeURIComponent(path)}`;
 
   fetch(url)
@@ -1016,7 +1187,10 @@ function loadTestResults() {
         li.style.cursor = "pointer";
         li.onclick = () => {
           console.log("Clicked:", file.path);
-          // trigger file open/view logic here
+        };
+        li.ondblclick = () => {
+          console.log("Double-clicked:", file.path);
+          handleConnectClick(file.path);
         };
         ul.appendChild(li);
       });
