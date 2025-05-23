@@ -1,13 +1,13 @@
 import json
 import re
 from collections import OrderedDict
+from typing import cast
 
 from dataclasses import dataclass, field
 from typing import Dict, Generic, List, Optional, OrderedDict, TypeVar, Union
 
 
 __all__ = [
-    "AppMemoryEntry",
     "BatteryEntry",
     "CoreInfo",
     "CPUInfo",
@@ -23,6 +23,7 @@ __all__ = [
     "parse_device_info",
     "TelemetryData",
     "TestDetails",
+    "make_empty_telemetry_data"
 ]
 
 
@@ -70,6 +71,35 @@ class DeviceInfo:
     memory: MemoryInfo = field(default_factory=MemoryInfo)
     storage: StorageInfo = field(default_factory=StorageInfo)
 
+    @classmethod
+    def from_dict(cls, data: dict, ip_addr: str = "none") -> "DeviceInfo":
+        cpu_data = data.get("cpu", {})
+        core_objs = []
+
+        for label, desc in cpu_data.get("cores", {}).items():
+            match = re.match(r"Cortex-([A-Z0-9\-]+).*?(\d+)\s*MHz", desc)
+            if match:
+                core_type = f"Cortex-{match.group(1)}"
+                frequency = int(match.group(2))
+                core_id = int(label.replace("core", ""))
+                core_objs.append(CoreInfo(core_id=core_id, core_type=core_type, frequency_mhz=frequency))
+
+        return cls(
+            manufacturer=data.get("manufacturer", ""),
+            model=data.get("model", ""),
+            soc_manufacturer=data.get("soc_manufacturer", ""),
+            soc=data.get("soc", ""),
+            android_version=data.get("android_version", ""),
+            ip_addr=ip_addr,
+            cpu=CPUInfo(
+                architecture=cpu_data.get("architecture", ""),
+                cores=sorted(core_objs, key=lambda c: c.core_id)
+            ),
+            display_resolution=DisplayResolution(**data.get("display_resolution", {})),
+            memory=MemoryInfo(**data.get("memory", {})),
+            storage=StorageInfo(**data.get("storage", {}))
+        )
+
     def to_dict(self) -> dict:
         return {
             "manufacturer": self.manufacturer,
@@ -100,41 +130,37 @@ class DeviceInfo:
 @dataclass
 class BatteryEntry:
     elapsed_time: float
-    battery_level: float
+    level: float
+    current_ma: float = 0
+    charge_count: int = 0
+    battery_temp : float = 0
 
 
 @dataclass
 class FramedropEntry:
-    elapsed_time: float
-    delta_framedrops: int
+    elapsed_time: float = 0.0
+    delta_framedrops: int = 0
 
 
 @dataclass
 class MemoryEntry:
-    elapsed_time: float
-    total_kb: int
-    used_kb: int
-
-
-@dataclass
-class AppMemoryEntry:
-    elapsed_time: float
-    app_kb: int
+    elapsed_time: float = 0.0
+    used_kb: int = 0
 
 
 @dataclass
 class CpuUsageEntry:
-    elapsed_time: float
-    usage_pct: Dict[str, float]
+    elapsed_time: float = 0
+    usage_pct: Dict[str, float] = field(default_factory=dict)
     raw_stats: Dict[
         str, List[int]
-    ]  # e.g., {"cpu": [...], "cpu0": [...], "cpu1": [...]}
+    ]  = field(default_factory=dict)
 
 
 @dataclass
 class CpuFreguencyEntry:
-    elapsed_time: float
-    frequencies: Dict[str, int]
+    elapsed_time: float = 0.0
+    frequencies: Dict[str, int] = field(default_factory=dict)
 
 
 @dataclass
@@ -167,10 +193,32 @@ class TelemetryData:
     test_details: TestDetails
     battery_data: list[BatteryEntry]
     system_memory: list[MemoryEntry]
-    app_memory: list[AppMemoryEntry]
+    app_memory: list[MemoryEntry]
     frame_drops: list[FramedropEntry]
     cpu_freq: List[CpuFreguencyEntry]
     cpu_usage: List[CpuUsageEntry] = field(default_factory=list)
+
+def make_empty_telemetry_data() -> TelemetryData:
+    obj = object.__new__(TelemetryData)
+
+    # Explicitly cast to avoid Pyright confusion
+    obj = cast(TelemetryData, obj)
+
+
+    obj.owner_session_id = ""
+    obj.device_id = ""
+    obj.device_ipaddr = ""
+    obj.device_info = DeviceInfo()  
+    obj.start_time = 0.0
+    obj.test_details = TestDetails()
+    obj.battery_data = []
+    obj.system_memory = []
+    obj.app_memory = []
+    obj.frame_drops = []
+    obj.cpu_freq = []
+    obj.cpu_usage = []
+
+    return obj
 
 
 def parse_cores(core_dict: dict) -> List[CoreInfo]:

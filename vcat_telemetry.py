@@ -18,6 +18,7 @@ from typing import Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 import subprocess
 import atexit
+import tempfile
 
 # Keep Mac awake while server is running
 caffeinate_proc = subprocess.Popen(["caffeinate", "-i"])
@@ -30,6 +31,7 @@ import vcat_http_proxy
 from flask import Flask, jsonify, make_response, request, Response, send_from_directory
 from vcat_logging import logger
 from vcat_telemetry_data_models import * 
+from vcat_telemetry_reader import * 
 from vcat_telemetry_writer import *
 from vcat_config import *
 
@@ -317,13 +319,13 @@ def telemetry_worker():
 
                 if battery is not None:
                     telemetry_data.battery_data.append(
-                        BatteryEntry(elapsed_time=elapsed, battery_level=battery)
+                        BatteryEntry(elapsed_time=elapsed, level=battery)
                     )
 
                     row = [
                         [
                             telemetry_data.battery_data[-1].elapsed_time,
-                            telemetry_data.battery_data[-1].battery_level,
+                            telemetry_data.battery_data[-1].level,
                         ]
                     ]
                     append_telemetry(
@@ -332,15 +334,15 @@ def telemetry_worker():
                         row,
                     )
 
-                if total_kb is not None and used_kb is not None and app_kb is not None:
+                if used_kb is not None and app_kb is not None:
                     telemetry_data.system_memory.append(
                         MemoryEntry(
-                            elapsed_time=elapsed, total_kb=total_kb, used_kb=used_kb
+                            elapsed_time=elapsed, used_kb=used_kb
                         )
                     )
 
                     telemetry_data.app_memory.append(
-                        AppMemoryEntry(elapsed_time=elapsed, app_kb=app_kb)
+                        MemoryEntry(elapsed_time=elapsed, used_kb=app_kb)
                     )
 
                     mem_entry = telemetry_data.system_memory[-1]
@@ -348,9 +350,8 @@ def telemetry_worker():
 
                     row = [
                         mem_entry.elapsed_time,
-                        mem_entry.total_kb,
                         mem_entry.used_kb,
-                        app_entry.app_kb,
+                        app_entry.used_kb,
                     ]
                     append_telemetry(
                         telemetry_data.owner_session_id, TelemetrySheet.MEMORY, [row]
@@ -791,7 +792,71 @@ def launch_vcat_api(session_id, device_id):
         "already_running": already_running
     })
 
+def get_device_file(
+    session_id: str,
+    device_id: str,
+    device_file_path: str,
+    local_path: str = "",
+    force_temp: bool = True
+) -> str:
+    """
+    Pulls a file from an Android device to the host machine via ADB.
 
+    Args:
+        session_id (str): Session ID for logging.
+        device_id (str): ADB device ID.
+        device_file_path (str): Full path on the Android device (e.g. /sdcard/foo.csv).
+        local_path (str): Optional full or relative path on host where to save the file.
+        force_temp (bool): If True, override local_path and save to a unique file in temp folder.
+
+    Returns:
+        str: The full local path of the downloaded file.
+
+    Raises:
+        Exception: If pull fails or directory is not writable.
+    """
+
+    if force_temp or not local_path:
+        base_name = os.path.basename(device_file_path)
+        unique_name = f"{uuid.uuid4().hex}_{base_name}"
+        local_path = os.path.join(tempfile.gettempdir(), unique_name)
+    else:
+        local_path = os.path.normpath(local_path)
+        local_dir = os.path.dirname(local_path)
+        if not os.path.isdir(local_dir) or not os.access(local_dir, os.W_OK):
+            raise Exception(f"Directory '{local_dir}' is not writable")
+
+    adb_cmd = cmd = ["adb", "pull", device_file_path, local_path]
+
+    vcat_adb.run_adb_command_with_log(session_id, device_id, adb_cmd)
+    return local_path
+
+@app.route('/api/device/copy_file')
+@require_valid_session_and_device
+def copy_file(session_id, device_id):
+    device_file_path = request.args.get("file_path")
+    if not device_file_path:
+        return jsonify({
+            "status": "error",
+            "message": "Missing required query parameter: test_file_path"
+        }), 400
+
+    try:
+        local_path = get_device_file(
+            session_id=session_id,
+            device_id=device_id,
+            device_file_path=device_file_path,
+            force_temp=True  # ignore caller's destination
+        )
+        return jsonify({
+            "status": "success",
+            "local_path": local_path
+        })
+    except Exception as e:
+        return jsonify({
+            "status": "error",
+            "message": str(e)
+        }), 500
 
 @app.route('/api/device/ping')
 @require_valid_session_and_device
@@ -1063,6 +1128,96 @@ def api_device_test_results_files(session_id, device_id, path):
 # Telemetry
 ##########################################
 
+from dataclasses import asdict
+from datetime import datetime
+
+def build_telemetry_response(telemetry, device_id: str) -> dict:
+    return {
+        "timestamp": datetime.now().isoformat(),
+        "device_id": device_id,
+        "test_details": asdict(telemetry.test_details),
+        "telemetry_data": {
+            "battery": [
+                {"elapsed_time": entry.elapsed_time, "level": entry.level}
+                for entry in telemetry.battery_data
+            ],
+            "system_memory": [
+                {
+                    "elapsed_time": entry.elapsed_time,
+                    "used_kb": entry.used_kb,
+                }
+                for entry in telemetry.system_memory
+            ],
+            "app_memory": [
+                {
+                    "elapsed_time": entry.elapsed_time,
+                    "used_kb": entry.used_kb,
+                }
+                for entry in telemetry.app_memory
+            ],
+            "cpu_usage": [
+                {
+                    "elapsed_time": entry.elapsed_time,
+                    **entry.usage_pct,
+                }
+                for entry in telemetry.cpu_usage
+            ],
+            "cpu_freq": [
+                {
+                    "elapsed_time": entry.elapsed_time,
+                    "frequencies": entry.frequencies,
+                }
+                for entry in telemetry.cpu_freq
+            ],
+            "frame_drops": [
+                {
+                    "elapsed_time": entry.elapsed_time,
+                    "delta_framedrops": entry.delta_framedrops,
+                }
+                for entry in telemetry.frame_drops
+            ],
+        },
+    }
+
+
+@app.route("/api/vcat_monitor/telemetry_from_file", methods=["GET"])
+@require_valid_session_and_device
+def api_telemetry_from_file(session_id, device_id):
+
+    device_file_path = request.args.get("file_path")
+    if not device_file_path:
+        return jsonify({
+            "status": "error",
+            "message": "Missing required query parameter: file_path"
+        }), 400
+
+    logger.info(f"api_telemetry_from_file: [{session_id}] [{device_id}] [{device_file_path}]")
+    local_path = ""
+
+    try:
+        local_path = get_device_file(
+            session_id=session_id,
+            device_id=device_id,
+            device_file_path=device_file_path,
+            force_temp=True  # ignore caller's destination
+        )
+
+        telemetry = read_telemetry_data(local_path)
+
+        response = build_telemetry_response(telemetry, device_id)
+
+        return Response(
+            json.dumps(response, indent=2, sort_keys=False), mimetype="application/json"
+        )
+
+    except Exception as e:
+        logger.error(f"message: [{str(e)}]")
+        return jsonify({
+            "status": "error",
+            "message": str(e)
+        }), 500
+
+
 
 @app.route("/api/vcat_monitor/telemetry", methods=["GET"])
 @require_valid_session_and_device
@@ -1083,69 +1238,7 @@ def api_telemetry(session_id, device_id):
             )
             return jsonify({"message": "Telemetry not avaiable yet."}), 202
 
-        # Test detqails
-        test_details = asdict(telemetry.test_details)
-
-        # Battery records
-        battery = [
-            {"elapsed_time": entry.elapsed_time, "battery_level": entry.battery_level}
-            for entry in telemetry.battery_data
-        ]
-
-        # System memory records
-        system_memory = [
-            {
-                "elapsed_time": entry.elapsed_time,
-                "total_kb": entry.total_kb,
-                "used_kb": entry.used_kb,
-            }
-            for entry in telemetry.system_memory
-        ]
-
-        # App memory records
-        app_memory = [
-            {
-                "elapsed_time": entry.elapsed_time,
-                "app_kb": entry.app_kb,
-            }
-            for entry in telemetry.app_memory
-        ]
-
-        # CPU usage records (% per core + total)
-        cpu_usage = [
-            {
-                "elapsed_time": entry.elapsed_time,
-                **entry.usage_pct,  # expands to { "core0": 5.1, "core1": ..., "total": 3.2 }
-            }
-            for entry in telemetry.cpu_usage
-        ]
-
-        cpu_freq = [
-            {"elapsed_time": entry.elapsed_time, "frequencies": entry.frequencies}
-            for entry in telemetry.cpu_freq
-        ]
-
-        frame_drops = [
-            {
-                "elapsed_time": entry.elapsed_time,
-                "delta_framedrops": entry.delta_framedrops,
-            }
-            for entry in telemetry.frame_drops
-        ]
-
-        response = {
-            "timestamp": datetime.now().isoformat(),
-            "device_id": device_id,
-            "test_details": test_details,
-            "telemetry_data": {
-                "battery": battery,
-                "system_memory": system_memory,
-                "app_memory": app_memory,
-                "frame_drops": frame_drops,
-                "cpu_usage": cpu_usage,
-                "cpu_freq": cpu_freq,
-            },
-        }
+        response = build_telemetry_response(telemetry, device_id)
 
         touch_session_access(session_id, device_id)
         vcat_adb.touchConsole(session_id)

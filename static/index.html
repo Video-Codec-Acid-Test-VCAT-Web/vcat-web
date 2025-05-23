@@ -134,7 +134,7 @@
                         </div>
                     </div>
                     <!--telemetry-toolbar-->
-                <div class="dashboard-grid" style="
+                    <div class="dashboard-grid" style="
                   display: grid;
                   grid-template-columns: repeat(auto-fill, minmax(380px, 1fr));
                   gap: 20px;
@@ -159,28 +159,42 @@
                                             <div class="test-video-row"> <label for="current-start-time">Start:</label> <input id="current-start-time" readonly /> </div>
                                             <!--test-video-column-->
                                             <div class="test-video-row"> <label for="test-file">File:</label> <input id="test-file" readonly />
-                                            </div> <!--test-video-row-->
+                                            </div>
+                                            <!--test-video-row-->
                                             <div class="test-video-row"> <label for="test-codec">Codec:</label> <input id="test-codec" readonly />
-                                            </div> <!--test-video-row-->
+                                            </div>
+                                            <!--test-video-row-->
                                             <div class="test-video-row"> <label for="test-decoder">Decoder:</label> <input id="test-decoder" readonly />
-                                            </div> <!--test-video-row-->
-                                        </div> <!--test-video-column left-column-->
+                                            </div>
+                                            <!--test-video-row-->
+                                        </div>
+                                        <!--test-video-column left-column-->
                                         <div class="test-video-column right-column">
                                             <div class="test-video-row"> <label for="test-resolution">Resolution:</label> <input id="test-resolution" readonly />
-                                            </div> <!--test-video-row-->
+                                            </div>
+                                            <!--test-video-row-->
                                             <div class="test-video-row"> <label for="test-mimetype">Mime Type:</label> <input id="test-mimetype" readonly />
-                                            </div> <!--test-video-row-->
+                                            </div>
+                                            <!--test-video-row-->
                                             <div class="test-video-row"> <label for="test-bitrate">Bitrate:</label> <input id="test-bitrate" readonly />
-                                            </div> <!--test-video-row-->
+                                            </div>
+                                            <!--test-video-row-->
                                             <div class="test-video-row"> <label for="test-framerate">Frame Rate:</label> <input id="test-framerate" readonly />
-                                            </div> <!--test-video-row-->
-                                        </div>  <!--test-video-column right-column-->
-                                    </div> <!--test-video-grid-->
-                                </fieldset> <!--current-test-video-->
-                            </div> <!--test-details-top-->
+                                            </div>
+                                            <!--test-video-row-->
+                                        </div>
+                                        <!--test-video-column right-column-->
+                                    </div>
+                                    <!--test-video-grid-->
+                                </fieldset>
+                                <!--current-test-video-->
+                            </div>
+                            <!--test-details-top-->
                             <div id="player-controls" style="margin-top: auto; display: flex; justify-content: center; gap: 16px; background: #111; padding: 10px 20px; border-radius: 8px; border: 1px solid #555;"> <img id="btn-play-pause" src="/static/btn_play_pause.png" alt="Play/Pause" title="Play or Pause Video" style="width: 36px; height: 36px; cursor: not-allowed; opacity: 0.4; pointer-events: none;" onclick="sendControlCommand('play_pause')" /> <img id="btn-video-stats" src="/static/btn_video_stats.png" alt="Video Stats" title="Show Video Stats" style="width: 36px; height: 36px; cursor: not-allowed; opacity: 0.4; pointer-events: none;" onclick="sendControlCommand('show_stats')" /> <img id="btn-stop-test" src="/static/btn_stop_test.png" alt="Stop Test" title="Stop the Test" style="width: 36px; height: 36px; cursor: not-allowed; opacity: 0.4; pointer-events: none;" onclick="sendControlCommand('stop')" />
-                            </div> <!--player-controls-->
-                        </div>  <!--chart-wrapper-->
+                            </div>
+                            <!--player-controls-->
+                        </div>
+                        <!--chart-wrapper-->
                         <div class="chart-wrapper" style="
                           width: 100%;
                           max-width: 98%;
@@ -236,24 +250,29 @@
 
                             <h3>Battery Level</h3><canvas id="batteryChart"></canvas>
                         </div>
-                    </div>  <!--dashboard-grid-->
-                </div> <!--telemetry-tab-->
-            </div>  <!--tab-content-->
-        </div> <!--margin-->
-    </div> <!--main-tab-wrapper-->
-    <div id="run-config-modal" class="modal-overlay">
-        <div class="modal-content" id="run-config-modal-content"></div>
-    </div>
-    <div id="console-modal" class="console-float" style="display: none;">
-        <div id="console-modal-header" class="modal-header">Console<span class="modal-close" onclick="closeConsoleModal()">×</span></div>
-        <pre id="console-full" class="console-body"></pre>
-    </div>
-    <div id="reset-modal" class="modal-overlay">
-        <div class="modal-content"></div>
-    </div>
-    <div id="wireless-modal" class="modal-overlay">
-        <div class="modal-content"></div>
-    </div>
+                    </div>
+                    <!--dashboard-grid-->
+                </div>
+                <!--telemetry-tab-->
+            </div>
+            <!--tab-content-->
+        </div>
+        <!--margin-->
+        </div>
+        <!--main-tab-wrapper-->
+        <div id="run-config-modal" class="modal-overlay">
+            <div class="modal-content" id="run-config-modal-content"></div>
+        </div>
+        <div id="console-modal" class="console-float" style="display: none;">
+            <div id="console-modal-header" class="modal-header">Console<span class="modal-close" onclick="closeConsoleModal()">×</span></div>
+            <pre id="console-full" class="console-body"></pre>
+        </div>
+        <div id="reset-modal" class="modal-overlay">
+            <div class="modal-content"></div>
+        </div>
+        <div id="wireless-modal" class="modal-overlay">
+            <div class="modal-content"></div>
+        </div>
 </body>
 
 </html>

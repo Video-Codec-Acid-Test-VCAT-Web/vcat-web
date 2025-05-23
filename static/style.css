@@ -462,6 +462,11 @@ html, body {
   background: #FFA500; /* orange background */
 }
 
+.test-results-fieldset {
+    touch-action: manipulation;
+}
+
+
 
 
 

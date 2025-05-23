@@ -331,7 +331,7 @@ function updateChart(chartRef, canvasId, datasets, labels, yLabel, latestTime, s
 function updateBatteryChart(telemetry) {
   const battery = telemetry.battery || [];
   const labels = battery.map(p => p.elapsed_time);
-  const data = battery.map(p => p.battery_level);
+  const data = battery.map(p => p.level);
   const stepSize = computeStepSize(labels.at(-1) || 0);
   batteryChart = updateChart(
     batteryChart,
