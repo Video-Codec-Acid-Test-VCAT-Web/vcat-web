@@ -118,11 +118,53 @@ function handleConnectClick(source) {
     const tabButton = document.createElement("button");
     tabButton.id = `${tabId}-tab-btn`;
     tabButton.className = "tab-button";
-    tabButton.textContent = tabLabel;
     tabButton.onclick = () => showTab(tabId);
 
+    // Label wrapper
+    const labelSpan = document.createElement("span");
+    labelSpan.textContent = tabLabel;
+    tabButton.appendChild(labelSpan);
+
+  // Add close button for non-live tabs
+    if (!isLive) {
+      const closeBtn = document.createElement("span");
+      closeBtn.textContent = " ✖";
+      closeBtn.style.marginLeft = "8px";
+      closeBtn.style.color = "#ccc";
+      closeBtn.style.cursor = "pointer";
+
+      closeBtn.onclick = (e) => {
+        e.stopPropagation(); // prevent tab switching
+        closeTelemetryTab(tabId);
+      };
+
+      tabButton.appendChild(closeBtn);
+    }
+
     tabHeader.appendChild(tabButton);
+
   }
+
+  function closeTelemetryTab(tabId) {
+    console.log("🗑 Closing tab:", tabId);
+
+    // Remove tab button
+    const tabButton = document.getElementById(`${tabId}-tab-btn`);
+    if (tabButton) tabButton.remove();
+
+    // Remove tab content pane
+    const tabPane = document.getElementById(tabId);
+    if (tabPane) tabPane.remove();
+
+    // Remove associated charts
+    if (chartsByTabId[tabId]) {
+      delete chartsByTabId[tabId];
+    }
+
+    // Fallback to device tab if live is closed or none selected
+    showTab("device");
+  }
+
 
   // Create tab pane if needed
   if (!document.getElementById(`${tabId}-tab`)) {
@@ -211,7 +253,7 @@ function handleConnectClick(source) {
         });
   } else {
     // ✅ Static file-based telemetry
-    const url = `/api/vcat_monitor/telemetry_from_file?session=${session_token}&device=${deviceId}&file_path=${encodeURIComponent(filePath)}`;
+    const url = `/api/vcat_monitor/telemetry_from_file?session=${session_token}&device=${deviceId}&telemetry_file_path=${encodeURIComponent(filePath)}`;
 
     fetch(url)
         .then(res => res.json())
@@ -1183,17 +1225,94 @@ function loadTestResults() {
       files.forEach(file => {
         const li = document.createElement("li");
         li.textContent = file.display_name;
-        li.dataset.path = file.path; // preserve full path for actions
+        li.dataset.path = file.path;
         li.style.cursor = "pointer";
-        li.onclick = () => {
-          console.log("Clicked:", file.path);
+
+        li.onclick = (event) => {
+          const existingMenu = document.getElementById("context-menu");
+          if (existingMenu) existingMenu.remove();
+
+          const menu = document.createElement("div");
+          menu.id = "context-menu";
+          menu.style.position = "fixed";
+          menu.style.background = "#fff";
+          menu.style.border = "1px solid #ccc";
+          menu.style.boxShadow = "0 2px 6px rgba(0,0,0,0.15)";
+          menu.style.padding = "5px 0";
+          menu.style.minWidth = "150px";
+          menu.style.zIndex = 9999;
+          menu.style.top = `${event.clientY}px`;
+          menu.style.left = `${event.clientX}px`;
+
+          const createMenuItem = (label, onClick) => {
+            const item = document.createElement("div");
+            item.textContent = label;
+            item.style.padding = "6px 12px";
+            item.style.cursor = "pointer";
+            item.style.color = "#000";
+            item.style.background = "#fff";
+            item.onmouseenter = () => item.style.background = "#eee";
+            item.onmouseleave = () => item.style.background = "#fff";
+            item.onclick = () => {
+              onClick();
+              menu.remove();
+            };
+            return item;
+          };
+
+          // Open
+          menu.appendChild(createMenuItem("Open", () => {
+            handleConnectClick(file.path);
+          }));
+
+          // Download as submenu container
+          const downloadAs = document.createElement("div");
+          downloadAs.textContent = "Download as ▸";
+          downloadAs.style.position = "relative";
+          downloadAs.style.padding = "6px 12px";
+          downloadAs.style.cursor = "pointer";
+          downloadAs.style.color = "#000";
+          downloadAs.style.background = "#fff";
+          downloadAs.onmouseenter = () => submenu.style.display = "block";
+          downloadAs.onmouseleave = () => submenu.style.display = "none";
+
+          // Submenu
+          const submenu = document.createElement("div");
+          submenu.style.display = "none";
+          submenu.style.position = "absolute";
+          submenu.style.left = "100%";
+          submenu.style.top = "0";
+          submenu.style.background = "#fff";
+          submenu.style.border = "1px solid #ccc";
+          submenu.style.boxShadow = "0 2px 6px rgba(0,0,0,0.15)";
+          submenu.style.minWidth = "100px";
+
+          submenu.appendChild(createMenuItem("CSV", () => {
+            downloadLogFile(file.path, "text/csv");
+          }));
+
+          submenu.appendChild(createMenuItem("Excel", () => {
+            downloadLogFile(file.path, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+          }));
+
+          downloadAs.appendChild(submenu);
+          menu.appendChild(downloadAs);
+
+          document.body.appendChild(menu);
+
+          // Cleanup
+          const removeMenu = (e) => {
+            if (!menu.contains(e.target)) {
+              menu.remove();
+              document.removeEventListener("click", removeMenu);
+            }
+          };
+          setTimeout(() => document.addEventListener("click", removeMenu), 0);
         };
-        li.ondblclick = () => {
-          console.log("Double-clicked:", file.path);
-          handleConnectClick(file.path);
-        };
+
         ul.appendChild(li);
       });
+
     })
     .catch(err => {
       console.error("Failed to load test results:", err);
@@ -1201,3 +1320,44 @@ function loadTestResults() {
         "<li style='color: red;'>Failed to load test results</li>";
     });
 }
+
+async function pickExportPath() {
+  try {
+    const handle = await window.showSaveFilePicker({
+      suggestedName: "telemetry_export.xlsx",
+      types: [{
+        description: 'Excel Files',
+        accept: {
+          'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': ['.xlsx']
+        }
+      }]
+    });
+    return handle.name || (await handle.getFile()).name; // You can adjust this as needed
+  } catch (err) {
+    console.warn("User canceled file picker:", err);
+    return null;
+  }
+}
+
+function downloadLogFile(telemetryFilePath, mimetype) {
+  const deviceSelect = document.getElementById("device");
+  const selectedDeviceId = deviceSelect?.value;
+
+  if (!session_token || !selectedDeviceId || !telemetryFilePath || !mimetype) {
+    alert("Missing required data for download.");
+    return;
+  }
+
+  const encodedPath = encodeURIComponent(telemetryFilePath);
+  const encodedMime = encodeURIComponent(mimetype);
+
+  const url = `/api/vcat_monitor/download_telemetry_file?session=${session_token}&device=${selectedDeviceId}&telemetry_file_path=${encodedPath}&mimetype=${encodedMime}`;
+
+  console.log("📥 Downloading telemetry file:");
+  console.log("➡️ URL:", url);
+
+  // Trigger browser download
+  window.open(url, "_blank");
+}
+
+

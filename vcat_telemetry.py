@@ -1,14 +1,16 @@
 import argparse
+import atexit
 import json
 import os
 import random
+import re
 import struct
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import uuid
-import re
 from collections import OrderedDict
 from dataclasses import asdict, dataclass, field, is_dataclass
 from datetime import datetime
@@ -16,9 +18,6 @@ from functools import wraps
 from re import S
 from typing import Dict, List, Optional, Tuple
 from urllib.parse import urlparse
-import subprocess
-import atexit
-import tempfile
 
 # Keep Mac awake while server is running
 caffeinate_proc = subprocess.Popen(["caffeinate", "-i"])
@@ -28,10 +27,10 @@ import requests
 import vcat_adb
 import vcat_http_proxy
 
-from flask import Flask, jsonify, make_response, request, Response, send_from_directory
+from flask import Flask, jsonify, make_response, request, Response, send_from_directory, send_file
 from vcat_logging import logger
-from vcat_telemetry_data_models import * 
-from vcat_telemetry_reader import * 
+from vcat_telemetry_data_models import *
+from vcat_telemetry_reader import *
 from vcat_telemetry_writer import *
 from vcat_config import *
 
@@ -212,10 +211,10 @@ def telemetry_worker():
     session_idle_timeout = get_config_option(ConfigKey.TELEMETRY_SESSION_TIMEOUT)
 
     long_poll_interval = get_config_option(ConfigKey.DEVICE_POLL_STEADY)
-    initial_poll_interval= get_config_option(ConfigKey.DEVICE_POLL_INITIAL)
+    initial_poll_interval = get_config_option(ConfigKey.DEVICE_POLL_INITIAL)
     time_to_steady = get_config_option(ConfigKey.DEVICE_POLL_TIME_TO_STEADY)
 
-    session_state : OrderedDict[str, bool] = OrderedDict()
+    session_state: OrderedDict[str, bool] = OrderedDict()
 
     while not stop_event.is_set():
         if not telemetry_dataset:
@@ -229,8 +228,8 @@ def telemetry_worker():
 
             with session_thread_lock:
                 telemetry_data = telemetry_dataset.get(device_id)
-                if telemetry_data  is None:
-                    continue;
+                if telemetry_data is None:
+                    continue
 
             iteration_start_time = time.time()
 
@@ -238,10 +237,7 @@ def telemetry_worker():
             last_poll = session_last_poll.get(telemetry_data.owner_session_id, 0)
             time_since_last_poll = iteration_start_time - last_poll
 
-            if (
-                elapsed > time_to_steady
-                and time_since_last_poll < long_poll_interval
-            ):
+            if elapsed > time_to_steady and time_since_last_poll < long_poll_interval:
                 continue  # Skip polling this device for now
 
             touch_session_poll(telemetry_data.owner_session_id)
@@ -265,23 +261,32 @@ def telemetry_worker():
             test_details = get_test_details(telemetry_data.owner_session_id, device_id)
             telemetry_data.test_details = test_details
 
-            poll_when_not_testing = get_config_option(ConfigKey.TELEMETRY_COLLECTION) == TelemetryCollectionMode.ALWAYS
+            poll_when_not_testing = (
+                get_config_option(ConfigKey.TELEMETRY_COLLECTION)
+                == TelemetryCollectionMode.ALWAYS
+            )
             test_running = test_details.testState == "Running"
 
-            if test_running and poll_when_not_testing and not session_state.get(telemetry_data.owner_session_id, False) :
-                #we've just switched into test mode, reset all collected telemetry
-                logger.debug(f"[Monitor] Device {device_id} test active.  Resetting pre-test telemetry")
+            if (
+                test_running
+                and poll_when_not_testing
+                and not session_state.get(telemetry_data.owner_session_id, False)
+            ):
+                # we've just switched into test mode, reset all collected telemetry
+                logger.debug(
+                    f"[Monitor] Device {device_id} test active.  Resetting pre-test telemetry"
+                )
                 resetTelemetry(telemetry_data.owner_session_id, device_id)
 
             session_state[telemetry_data.owner_session_id] = test_running
 
             if not test_running:
-                if not poll_when_not_testing :
+                if not poll_when_not_testing:
                     logger.debug(
                         f"[Monitor] Device {device_id} is not running a test, skipping telemetry collection"
                     )
                     continue
-                else :
+                else:
                     logger.debug(
                         f"[Monitor] Device {device_id} is not running a test, only collecting system stats"
                     )
@@ -292,7 +297,9 @@ def telemetry_worker():
             app_kb = vcat_adb.get_app_memory(device_id)
 
             if test_running:
-                frame_drops = get_frame_drops(telemetry_data.owner_session_id, device_id)
+                frame_drops = get_frame_drops(
+                    telemetry_data.owner_session_id, device_id
+                )
             else:
                 frame_drops = None
 
@@ -336,9 +343,7 @@ def telemetry_worker():
 
                 if used_kb is not None and app_kb is not None:
                     telemetry_data.system_memory.append(
-                        MemoryEntry(
-                            elapsed_time=elapsed, used_kb=used_kb
-                        )
+                        MemoryEntry(elapsed_time=elapsed, used_kb=used_kb)
                     )
 
                     telemetry_data.app_memory.append(
@@ -412,9 +417,10 @@ def telemetry_worker():
                         [freq_row],
                     )
 
-        if stop_event.wait(timeout=get_config_option(ConfigKey.TELEMETRY_LOOP_POLL_INTERVAL)):
+        if stop_event.wait(
+            timeout=get_config_option(ConfigKey.TELEMETRY_LOOP_POLL_INTERVAL)
+        ):
             break
-
 
 
 def console_cleanup_loop():
@@ -474,9 +480,11 @@ def resetTelemetry(session_id, device_id):
 
     return telemetry_data
 
+
 class DeviceAccessException(Exception):
     def __init__(self, message: str):
         super().__init__(message)
+
 
 def get_device_info(
     session_id: str, device_id: str
@@ -487,10 +495,13 @@ def get_device_info(
 
     def run_adb(cmd: List[str]) -> str:
         full_cmd = ["adb", "-s", device_id] + cmd
-        output = vcat_adb.run_adb_command_with_log(session_id, device_id, full_cmd) or ""
+        output = (
+            vcat_adb.run_adb_command_with_log(session_id, device_id, full_cmd) or ""
+        )
         return output
 
         # Mapping of CPU part IDs to core types
+
     CPU_PART_MAP = {
         "0xd03": "Cortex-A53",
         "0xd04": "Cortex-A35",
@@ -515,6 +526,7 @@ def get_device_info(
     }
 
     try:
+
         def parse_wm_size(output: str) -> DisplayResolution:
             if "Physical size:" not in output:
                 raise DeviceAccessException("Missing 'Physical size' in wm size output")
@@ -554,7 +566,6 @@ def get_device_info(
                             core.core_type = core_type
                             break
 
-
         info = DeviceInfo()
 
         info.manufacturer = run_adb(["shell", "getprop", "ro.product.manufacturer"])
@@ -572,9 +583,17 @@ def get_device_info(
                 break
 
         for i in range(32):
-            freq = run_adb(["shell", "cat", f"/sys/devices/system/cpu/cpu{i}/cpufreq/cpuinfo_max_freq"])
+            freq = run_adb(
+                [
+                    "shell",
+                    "cat",
+                    f"/sys/devices/system/cpu/cpu{i}/cpufreq/cpuinfo_max_freq",
+                ]
+            )
             if freq.isdigit():
-                info.cpu.cores.append(CoreInfo(core_id=i, frequency_mhz=int(freq) // 1000))
+                info.cpu.cores.append(
+                    CoreInfo(core_id=i, frequency_mhz=int(freq) // 1000)
+                )
             else:
                 break
 
@@ -656,6 +675,7 @@ def require_valid_session_and_device(func):
 
     return wrapper
 
+
 def require_valid_session_device_and_path(func):
     @wraps(func)
     def wrapper(*args, **kwargs):
@@ -682,6 +702,7 @@ def require_valid_session_device_and_path(func):
 
     return wrapper
 
+
 def get_required_ip_and_port(session_id: str, device_id: str):
     ip_addr = vcat_adb.get_device_ip_and_port(session_id, device_id)
     if not ip_addr:
@@ -700,6 +721,7 @@ def get_required_ip(session_id: str, device_id: str):
         )
         raise ValueError("Could not determine IP or port")
     return ip_addr
+
 
 @app.route("/api/session_token", methods=["GET"])
 def session_token():
@@ -753,11 +775,13 @@ def api_reset_session_console_log(session_id):
 # Device management
 ##########################################
 
+
 def is_vcat_running(session_id: str, device_id: str) -> bool:
     package = "org.videolan.vcat"
     cmd = ["adb", "-s", device_id, "shell", "pidof", package]
     output = vcat_adb.run_adb_command_with_log(session_id, device_id, cmd)
     return bool(output and output.strip())
+
 
 def launch_vcat(session_id: str, device_id: str) -> Tuple[bool, bool]:
     """
@@ -770,34 +794,44 @@ def launch_vcat(session_id: str, device_id: str) -> Tuple[bool, bool]:
         return False, True
 
     package = "org.videolan.vcat"
-    cmd = ["adb", "-s", device_id, "shell", "monkey", "-p", package, "-c", "android.intent.category.LAUNCHER", "1"]
+    cmd = [
+        "adb",
+        "-s",
+        device_id,
+        "shell",
+        "monkey",
+        "-p",
+        package,
+        "-c",
+        "android.intent.category.LAUNCHER",
+        "1",
+    ]
     output = vcat_adb.run_adb_command_with_log(session_id, device_id, cmd)
 
     success = bool(output and "Events injected: 1" in output)
     return success, False
 
 
-@app.route('/api/device/vcat_running')
+@app.route("/api/device/vcat_running")
 @require_valid_session_and_device
 def vcat_running(session_id, device_id):
     running = is_vcat_running(session_id, device_id)
     return jsonify({"running": running})
 
-@app.route('/api/device/launch_vcat')
+
+@app.route("/api/device/launch_vcat")
 @require_valid_session_and_device
 def launch_vcat_api(session_id, device_id):
     launched, already_running = launch_vcat(session_id, device_id)
-    return jsonify({
-        "launched": launched,
-        "already_running": already_running
-    })
+    return jsonify({"launched": launched, "already_running": already_running})
+
 
 def get_device_file(
     session_id: str,
     device_id: str,
     device_file_path: str,
     local_path: str = "",
-    force_temp: bool = True
+    force_temp: bool = True,
 ) -> str:
     """
     Pulls a file from an Android device to the host machine via ADB.
@@ -831,42 +865,47 @@ def get_device_file(
     vcat_adb.run_adb_command_with_log(session_id, device_id, adb_cmd)
     return local_path
 
-@app.route('/api/device/copy_file')
+
+@app.route("/api/device/copy_file")
 @require_valid_session_and_device
 def copy_file(session_id, device_id):
     device_file_path = request.args.get("file_path")
     if not device_file_path:
-        return jsonify({
-            "status": "error",
-            "message": "Missing required query parameter: test_file_path"
-        }), 400
+        return (
+            jsonify(
+                {
+                    "status": "error",
+                    "message": "Missing required query parameter: test_file_path",
+                }
+            ),
+            400,
+        )
 
     try:
         local_path = get_device_file(
             session_id=session_id,
             device_id=device_id,
             device_file_path=device_file_path,
-            force_temp=True  # ignore caller's destination
+            force_temp=True,  # ignore caller's destination
         )
-        return jsonify({
-            "status": "success",
-            "local_path": local_path
-        })
+        return jsonify({"status": "success", "local_path": local_path})
     except Exception as e:
-        return jsonify({
-            "status": "error",
-            "message": str(e)
-        }), 500
+        return jsonify({"status": "error", "message": str(e)}), 500
 
-@app.route('/api/device/ping')
+
+@app.route("/api/device/ping")
 @require_valid_session_and_device
 def ping_device(session_id, device_id):
-    
+
     ip_addr = get_required_ip(session_id, device_id)
 
     try:
-        result = subprocess.run(["ping", "-c", "1", "-W", "1", ip_addr],
-                                capture_output=True, text=True, check=False)
+        result = subprocess.run(
+            ["ping", "-c", "1", "-W", "1", ip_addr],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
 
         # Write the actual ping output line-by-line into the console
         for line in result.stdout.strip().splitlines():
@@ -1055,26 +1094,17 @@ def api_enable_wireless_adb(session_id, device_id):
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+
 def get_files(session_id, device_id, path):
-        # Construct ADB command exactly as it would run in terminal
+    # Construct ADB command exactly as it would run in terminal
     full_cmd = ["adb", "-s", device_id, "shell", f"ls {path}"]
 
-
     output = vcat_adb.run_adb_command_with_log(
-        session_id=session_id,
-        device_id=device_id,
-        cmd=full_cmd,
-        log_level="debug"
+        session_id=session_id, device_id=device_id, cmd=full_cmd, log_level="debug"
     )
 
-
-
     # Split output into lines
-    filenames = [
-        line.strip()
-        for line in (output or "").splitlines()
-        if line.strip()
-    ]
+    filenames = [line.strip() for line in (output or "").splitlines() if line.strip()]
 
     return filenames
 
@@ -1092,6 +1122,7 @@ def api_device_files(session_id, device_id, path):
         app.logger.error(f"[{device_id}] Failed to list playlists in {path}: {e}")
         return jsonify({"error": "Failed to list playlist files"}), 500
 
+
 @app.route("/api/device/test_results_files", methods=["GET"])
 @require_valid_session_device_and_path
 def api_device_test_results_files(session_id, device_id, path):
@@ -1105,7 +1136,7 @@ def api_device_test_results_files(session_id, device_id, path):
 
         for path in sorted_files:
             # Example: extract '1747269593728' from the filename
-            match = re.search(r'logs_(\d+)_infinite\.csv', path)
+            match = re.search(r"logs_(\d+)_infinite\.csv", path)
             if match:
                 timestamp_ms = int(match.group(1))
                 dt = datetime.fromtimestamp(timestamp_ms / 1000.0)
@@ -1113,10 +1144,7 @@ def api_device_test_results_files(session_id, device_id, path):
             else:
                 display = path  # fallback if pattern doesn't match
 
-            file_entries.append({
-                "path": path,
-                "display_name": display
-            })
+            file_entries.append({"path": path, "display_name": display})
 
         return jsonify(file_entries)
 
@@ -1124,12 +1152,14 @@ def api_device_test_results_files(session_id, device_id, path):
         app.logger.error(f"[{device_id}] Failed to list playlists in {path}: {e}")
         return jsonify({"error": "Failed to list playlist files"}), 500
 
+
 ##########################################
 # Telemetry
 ##########################################
 
 from dataclasses import asdict
 from datetime import datetime
+
 
 def build_telemetry_response(telemetry, device_id: str) -> dict:
     return {
@@ -1184,14 +1214,21 @@ def build_telemetry_response(telemetry, device_id: str) -> dict:
 @require_valid_session_and_device
 def api_telemetry_from_file(session_id, device_id):
 
-    device_file_path = request.args.get("file_path")
+    device_file_path = request.args.get("telemetry_file_path")
     if not device_file_path:
-        return jsonify({
-            "status": "error",
-            "message": "Missing required query parameter: file_path"
-        }), 400
+        return (
+            jsonify(
+                {
+                    "status": "error",
+                    "message": "Missing required query parameter: file_path",
+                }
+            ),
+            400,
+        )
 
-    logger.info(f"api_telemetry_from_file: [{session_id}] [{device_id}] [{device_file_path}]")
+    logger.info(
+        f"api_telemetry_from_file: [{session_id}] [{device_id}] [{device_file_path}]"
+    )
     local_path = ""
 
     try:
@@ -1199,10 +1236,10 @@ def api_telemetry_from_file(session_id, device_id):
             session_id=session_id,
             device_id=device_id,
             device_file_path=device_file_path,
-            force_temp=True  # ignore caller's destination
+            force_temp=True,  # ignore caller's destination
         )
 
-        telemetry = read_telemetry_data(local_path)
+        telemetry = read_telemetry_data(session_id, local_path)
 
         response = build_telemetry_response(telemetry, device_id)
 
@@ -1212,11 +1249,81 @@ def api_telemetry_from_file(session_id, device_id):
 
     except Exception as e:
         logger.error(f"message: [{str(e)}]")
-        return jsonify({
-            "status": "error",
-            "message": str(e)
-        }), 500
+        return jsonify({"status": "error", "message": str(e)}), 500
 
+
+@app.route("/api/vcat_monitor/download_telemetry_file", methods=["GET"])
+@require_valid_session_and_device
+def api_export_telemetry_file(session_id, device_id):
+    device_file_path = request.args.get("telemetry_file_path")
+    requested_mimetype = request.args.get("mimetype", "text/csv")
+
+    if not device_file_path:
+        return (
+            jsonify(
+                {
+                    "status": "error",
+                    "message": "Missing required query parameter: telemetry_file_path",
+                }
+            ),
+            400,
+        )
+
+    allowed_mimetypes = {
+        "text/csv",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    }
+
+    if requested_mimetype not in allowed_mimetypes:
+        return jsonify({"error": f"Unsupported mimetype: {requested_mimetype}"}), 400
+
+    logger.info(
+        f"api_export_telemetry_file: [{session_id}] [{device_id}] input=[{device_file_path}] mime_type=[{requested_mimetype}]"
+    )
+
+    try:
+        local_path = get_device_file(
+            session_id=session_id,
+            device_id=device_id,
+            device_file_path=device_file_path,
+            force_temp=True,  # ensure a local copy
+        )
+
+        base_name = os.path.basename(device_file_path)
+        name_root = os.path.splitext(base_name)[0]
+
+        if requested_mimetype == "text/csv":
+            return send_file(
+                local_path,
+                mimetype="text/csv",
+                as_attachment=True,
+                download_name=f"{name_root}.csv"
+            )
+
+        telemetry = read_telemetry_data(session_id, local_path)
+
+        # Generate export in a temp location
+        from tempfile import NamedTemporaryFile
+        with NamedTemporaryFile(suffix=".xlsx", delete=False) as temp_file:
+            export_path = temp_file.name
+
+        # Attempt export
+        exported_file = export_telemetry(session_id, device_id, telemetry, export_path)
+
+        # Derive output filename from input CSV
+        base_name = os.path.basename(device_file_path)
+        download_name = os.path.splitext(base_name)[0] + ".xlsx"
+
+        return send_file(
+            export_path,
+            mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            as_attachment=True,
+            download_name=download_name  # ← matches base name
+        )
+
+    except Exception as e:
+        logger.error(f"Export failed: {str(e)}")
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 
 @app.route("/api/vcat_monitor/telemetry", methods=["GET"])
@@ -1259,7 +1366,7 @@ def api_start_device_monitor(session_id, device_id):
         launched, already_running = launch_vcat(session_id, device_id)
         if not launched and not already_running:
             logger.error("Unable to launch VCAT")
-        time.sleep(.5)
+        time.sleep(0.5)
 
     ip_addr = ""
 
@@ -1279,6 +1386,7 @@ def api_start_device_monitor(session_id, device_id):
     time.sleep(0.5)
 
     telemetry_data = resetTelemetry(session_id, device_id)
+    telemetry_data.device_info = device_info
 
     touch_session_access(session_id, device_id)
 
@@ -1297,15 +1405,25 @@ def api_start_device_monitor(session_id, device_id):
 def api_is_connected(session_id, device_id):
 
     if device_id in telemetry_dataset:
-        return jsonify({
-            "monitored": True,
-            "status": f"device_id '{device_id}' is being monitored by session_id '{session_id}'"
-        }), 200
+        return (
+            jsonify(
+                {
+                    "monitored": True,
+                    "status": f"device_id '{device_id}' is being monitored by session_id '{session_id}'",
+                }
+            ),
+            200,
+        )
 
-    return jsonify({
-        "monitored": False,
-        "status": f"device_id '{device_id}' is not being monitored by session_id '{session_id}'"
-    }), 200
+    return (
+        jsonify(
+            {
+                "monitored": False,
+                "status": f"device_id '{device_id}' is not being monitored by session_id '{session_id}'",
+            }
+        ),
+        200,
+    )
 
 
 @app.route("/api/vcat_monitor/stop", methods=["POST"])
@@ -1320,12 +1438,13 @@ def api_stop_device_monitor(session_id, device_id):
         telemetry_dataset.pop(device_id, None)
         session_last_access.pop(device_id, None)
         close_telemetry_excel(session_id)
-    
+
         if not telemetry_dataset:
             stop_event.set()
 
-
-    logger.info(f"api/vcat_monitor/stop: executed for device id '[{device_id}] and session_id '[{session_id}]")
+    logger.info(
+        f"api/vcat_monitor/stop: executed for device id '[{device_id}] and session_id '[{session_id}]"
+    )
     return jsonify({"status": "monitoring_stopped", "device_id": device_id}), 200
 
 
@@ -1370,7 +1489,12 @@ def api_vcat_monitor_reset(session_id, device_id):
 
     with session_thread_lock:
         if telemetry_dataset.get(device_id) is None:
-            return jsonify({f"status": "no telemetry session for device_id: [{device_id}]"}), 200
+            return (
+                jsonify(
+                    {f"status": "no telemetry session for device_id: [{device_id}]"}
+                ),
+                200,
+            )
 
     resetTelemetry(session_id, device_id)
 
@@ -1406,6 +1530,7 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
     app.run(host=args.host, port=args.port, debug=True)
+
 
 @atexit.register
 def cleanup_caffeinate():

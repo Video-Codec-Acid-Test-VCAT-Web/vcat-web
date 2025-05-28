@@ -1,26 +1,24 @@
 import csv
-from vcat_telemetry_data_models import * 
-from typing import Dict, Generic, List, Optional, OrderedDict, TypeVar, Union
-from typing import List, Tuple
-from datetime import datetime
-import re
+from vcat_telemetry_data_models import *
 import os
+import re
+from datetime import datetime
+from typing import Dict, Generic, List, Optional, OrderedDict, Tuple, TypeVar, Union
 
-path = '/storage/emulated/0/Download/f720p-p7-crf50-av1-fd2.mp4'
+path = "/storage/emulated/0/Download/f720p-p7-crf50-av1-fd2.mp4"
 filename = os.path.basename(path)
 print(filename)
 
 
-__all__ = [
-    "read_telemetry_data"
-]
-
-import json
+__all__ = ["read_telemetry_data"]
 
 import json
 from typing import List, Tuple
 
-def extract_json_object_from_lines(lines: List[str], start_row: int = 0) -> Tuple[dict, int]:
+
+def extract_json_object_from_lines(
+    lines: List[str], start_row: int = 0
+) -> Tuple[dict, int]:
     json_lines = []
     brace_balance = 0
     json_started = False
@@ -49,7 +47,7 @@ def extract_json_object_from_lines(lines: List[str], start_row: int = 0) -> Tupl
 
 
 def _read_telemetry_dicts(filepath) -> Tuple[List[dict], List[str]]:
-    with open(filepath, newline='') as f:
+    with open(filepath, newline="") as f:
 
         preamble_lines = []
         # Find the header line
@@ -63,7 +61,7 @@ def _read_telemetry_dicts(filepath) -> Tuple[List[dict], List[str]]:
             raise ValueError(f"No header found in [(filepath)]")
 
         # Now use DictReader from that point on
-        reader = csv.DictReader(f, fieldnames=header_line.split(','))
+        reader = csv.DictReader(f, fieldnames=header_line.split(","))
         rows = list(reader)
         return rows, preamble_lines
 
@@ -73,6 +71,7 @@ def parse_float(value) -> float:
         raise ValueError("Expected float, got None")
     match = re.search(r"[-+]?\d*\.?\d+", value)
     return float(match.group()) if match else 0.0
+
 
 def parse_int(value) -> int:
     if value is None:
@@ -89,6 +88,7 @@ def _read_battery_row(elapsed_time: float, row: dict) -> BatteryEntry:
         battery_temp=parse_float(row.get("battery.temperature")),
     )
 
+
 def _read_cpu_freqs(elapsed_time: float, row: dict) -> CpuFreguencyEntry:
     freqs = {
         key.split(".")[-1]: parse_int(value)
@@ -96,10 +96,7 @@ def _read_cpu_freqs(elapsed_time: float, row: dict) -> CpuFreguencyEntry:
         if key.startswith("cpu.freq")
     }
 
-    return CpuFreguencyEntry(
-        elapsed_time=elapsed_time,
-        frequencies=freqs
-    )
+    return CpuFreguencyEntry(elapsed_time=elapsed_time, frequencies=freqs)
 
 
 def _read_cpu_usages(elapsed_time: float, row: dict) -> CpuUsageEntry:
@@ -119,9 +116,8 @@ def _read_cpu_usages(elapsed_time: float, row: dict) -> CpuUsageEntry:
     return CpuUsageEntry(
         elapsed_time=elapsed_time,
         usage_pct=usage,
-        raw_stats={}  # You can populate this later if needed
+        raw_stats={},  # You can populate this later if needed
     )
-
 
 
 def _read_frame_drops(elapsed_time: float, row: dict) -> FramedropEntry:
@@ -129,26 +125,26 @@ def _read_frame_drops(elapsed_time: float, row: dict) -> FramedropEntry:
     if value is None:
         raise ValueError("Missing 'video.frames_dropped'")
 
-    return FramedropEntry(
-        elapsed_time=elapsed_time,
-        delta_framedrops=parse_int(value)
-    )
+    return FramedropEntry(elapsed_time=elapsed_time, delta_framedrops=parse_int(value))
 
 
 def _read_system_memory(elapsed_time: float, row: dict):
 
     return MemoryEntry(elapsed_time=elapsed_time, used_kb=0)
 
+
 def read_app_memory(elapsed_time: float, row: dict):
 
     return MemoryEntry(elapsed_time=elapsed_time, used_kb=0)
 
+
 def _read_timestamp(row) -> int:
-    return int(float(row["test.timestamp"]))  # Handles integers and float strings like "1716308013.245"
+    return int(
+        float(row["test.timestamp"])
+    )  # Handles integers and float strings like "1716308013.245"
 
 
-
-def read_telemetry_data(telemetry_file) -> TelemetryData:
+def read_telemetry_data(session_id, telemetry_file) -> TelemetryData:
 
     # code here
 
@@ -161,17 +157,20 @@ def read_telemetry_data(telemetry_file) -> TelemetryData:
 
     rows, preamble_lines = _read_telemetry_dicts(telemetry_file)
 
-    device_info_json, next_row = extract_json_object_from_lines(preamble_lines, 0);
-    device_info = DeviceInfo.from_dict(device_info_json, )
+    device_info_json, next_row = extract_json_object_from_lines(preamble_lines, 0)
+    device_info = DeviceInfo.from_dict(
+        device_info_json,
+    )
 
-    test_details_json, next_row = extract_json_object_from_lines(preamble_lines, next_row)
-    
+    test_details_json, next_row = extract_json_object_from_lines(
+        preamble_lines, next_row
+    )
+
     start_time = _read_timestamp(rows[0])
-
 
     for row in rows:
         cur_time = _read_timestamp(row)
-        elapsed_time = (cur_time - start_time)/1000.0
+        elapsed_time = (cur_time - start_time) / 1000.0
         battery_data.append(_read_battery_row(elapsed_time, row))
         cpu_freq.append(_read_cpu_freqs(elapsed_time, row))
         cpu_usage.append(_read_cpu_usages(elapsed_time, row))
@@ -183,24 +182,25 @@ def read_telemetry_data(telemetry_file) -> TelemetryData:
 
     # build test details
     current_video = CurrentTestVideo(
-        fileName=os.path.basename(rows[0]["video.filename"]), 
-        startTime = test_start_time, 
-        videoCodec = rows[0]["video.codec_name"], 
-        videoDecoder=rows[0]["video.decoder_name"], 
-        resolution=rows[0]["video.resolution"], 
+        fileName=os.path.basename(rows[0]["video.filename"]),
+        startTime=test_start_time,
+        videoCodec=rows[0]["video.codec_name"],
+        videoDecoder=rows[0]["video.decoder_name"],
+        resolution=rows[0]["video.resolution"],
         mimeType=rows[0].get("video.mime", "None"),
-        bitrate=rows[0]["video.bitrate"], 
-        framerate= parse_float(rows[0]["video.framerate"])
+        bitrate=rows[0]["video.bitrate"],
+        framerate=parse_float(rows[0]["video.framerate"]),
     )
 
     test_details = TestDetails(
         testState="Completed",
         startTime=test_start_time,
         playlist=test_details_json["playlist"],
-        currentTestVideo=current_video
-    )  
+        currentTestVideo=current_video,
+    )
 
     telemetry = make_empty_telemetry_data()
+    telemetry.owner_session_id = session_id
     telemetry.device_info = device_info
     telemetry.start_time = start_time
     telemetry.battery_data = battery_data
