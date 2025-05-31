@@ -143,6 +143,20 @@ function handleConnectClick(source) {
 
     tabHeader.appendChild(tabButton);
 
+    // Create tab pane if needed
+    if (!document.getElementById(`${tabId}-tab`)) {
+      const tabContent = document.getElementById("tab-content");
+
+      const tabPane = document.createElement("div");
+      tabPane.id = `${tabId}-tab`;
+      tabPane.className = "tab-pane";
+      tabPane.style.display = "none";
+
+      tabContent.appendChild(tabPane);
+
+      // ✅ Inject cloned template layout
+      setupTelemetryCanvas(tabId);
+    }
   }
 
   function closeTelemetryTab(tabId) {
@@ -166,50 +180,20 @@ function handleConnectClick(source) {
   }
 
 
-  // Create tab pane if needed
-  if (!document.getElementById(`${tabId}-tab`)) {
-    const tabContent = document.getElementById("tab-content");
-
-    const tabPane = document.createElement("div");
-    tabPane.id = `${tabId}-tab`;
-    tabPane.className = "tab-pane";
-    tabPane.style.display = "none";
-
-    tabContent.appendChild(tabPane);
-
-    // ✅ Inject cloned template layout
-    setupTelemetryCanvas(tabId);
-  }
-
-
   function setupTelemetryCanvas(tabId) {
-    const tabPane = document.getElementById(`${tabId}-tab`);
-    if (!tabPane) return;
-
-    // 🛡️ Don't inject template again if already present
-    if (tabPane.querySelector("canvas.cpuChart")) {
-      console.log(`⚠️ setupTelemetryCanvas already ran for ${tabId}`);
-      return;
-    }
-
     const template = document.getElementById("telemetry-tab-template");
-    if (!template) {
-      console.error("❌ Missing template #telemetry-tab-template");
-      return;
-    }
+    const clone = document.importNode(template.content, true);
 
-    const clone = template.content.cloneNode(true);
-
-    // Optionally add unique IDs to canvases
-    clone.querySelectorAll("canvas[class]").forEach(canvas => {
-      canvas.id = `${tabId}-${canvas.className}`; // e.g. telemetry123-cpuChart
+    // Assign tab-specific canvas IDs
+    const canvases = clone.querySelectorAll("canvas[data-id]");
+    canvases.forEach(canvas => {
+      const type = canvas.getAttribute("data-id");
+      canvas.id = `${tabId}-${type}`;
     });
 
+    const tabPane = document.getElementById(`${tabId}-tab`);
     tabPane.appendChild(clone);
-    console.log(`✅ Injected telemetry layout into ${tabId}`);
   }
-
-
 
 
   // Create tab content pane if needed
@@ -266,11 +250,11 @@ function handleConnectClick(source) {
             updateTestDetailsUI({ test_details: testDetails },tabId);
           }
 
-          updateCpuChart(telemetry, `${tabId}-cpuChart`, tabId);
-          updateBatteryChart(telemetry, `${tabId}-batteryChart`, tabId);
-          updateFreqChart(telemetry, `${tabId}-freqChart`, tabId);
-          updateMemoryChart(telemetry, `${tabId}-memoryChart`, tabId);
-          updateFrameDropChart(telemetry, `${tabId}-frameDropChart`, tabId);
+          updateCpuChart(telemetry, `${tabId}`, tabId);
+          updateBatteryChart(telemetry, `${tabId}`, tabId);
+          updateFreqChart(telemetry, `${tabId}`, tabId);
+          updateMemoryChart(telemetry, `${tabId}`, tabId);
+          updateFrameDropChart(telemetry, `${tabId}`, tabId);
         })
         .catch(err => {
           console.error("❌ Failed to load telemetry from file:", err);
@@ -517,29 +501,44 @@ function updateChart(chartRef, canvasId, datasets, labels, yLabel, latestTime, s
   return chartRef;
 }
 
-function updateBatteryChart(telemetry, chartId) {
+function updateBatteryChart(telemetry, tabId) {
   const battery = telemetry.battery || [];
+  if (!battery.length) return;
+
   const labels = battery.map(p => p.elapsed_time);
   const data = battery.map(p => p.level);
   const stepSize = computeStepSize(labels.at(-1) || 0);
-  batteryChart = updateChart(
-    batteryChart,
-    chartId,
-    [{ label: 'Battery Level (%)', data, borderWidth: 2 }],
-    labels,
-    'Battery Level (%)',
-    labels.at(-1),
-    stepSize
+
+  const canvasId = `${tabId}-batteryChart`;
+  const chartCanvas = document.getElementById(canvasId);
+  if (!chartCanvas) {
+    console.warn(`⚠️ Battery chart canvas not found: ${canvasId}`);
+    return;
+  }
+
+  chartsByTabId[tabId] ||= {};
+  chartsByTabId[tabId].batteryChart = updateChart(
+      chartsByTabId[tabId].batteryChart,
+      canvasId,
+      [{ label: 'Battery Level (%)', data, borderWidth: 2 }],
+      labels,
+      'Battery Level (%)',
+      labels.at(-1),
+      stepSize
   );
 }
 
-function updateCpuChart(telemetry, chartId, tabId) {
+
+function updateCpuChart(telemetry, tabId) {
   const cpu = telemetry.cpu_usage || [];
   const labels = cpu.map(p => p.elapsed_time);
   const stepSize = computeStepSize(labels.at(-1) || 0);
   const datasets = [];
 
-  const keys = Object.keys(cpu.at(-1) || {}).filter(k => k.startsWith("cpu"));
+  const last = cpu.at(-1);
+  if (!last) return; // no data
+
+  const keys = Object.keys(last).filter(k => k.startsWith("cpu"));
   keys.forEach((key, i) => {
     datasets.push({
       label: key === "cpu" ? "Total CPU (%)" : key,
@@ -552,11 +551,17 @@ function updateCpuChart(telemetry, chartId, tabId) {
     });
   });
 
-  // Create chart storage for this tab if needed
+  const canvasId = `${tabId}-cpuChart`;
+  const chartCanvas = document.getElementById(canvasId);
+  if (!chartCanvas) {
+    console.warn(`⚠️ CPU chart canvas not found: ${canvasId}`);
+    return;
+  }
+
   chartsByTabId[tabId] ||= {};
   chartsByTabId[tabId].cpuChart = updateChart(
       chartsByTabId[tabId].cpuChart,
-      chartId,
+      canvasId,  // 🔁 pass ID string, not element
       datasets,
       labels,
       "CPU Usage (%)",
@@ -566,28 +571,51 @@ function updateCpuChart(telemetry, chartId, tabId) {
 }
 
 
-function updateFreqChart(telemetry, chartId) {
+
+
+function updateFreqChart(telemetry, tabId) {
   const freq = telemetry.cpu_freq || [];
+  if (!freq.length) return;
+
   const labels = freq.map(p => p.elapsed_time);
   const stepSize = computeStepSize(labels.at(-1) || 0);
   const coreKeys = Object.keys(freq.at(-1)?.frequencies || {});
-  const datasets = coreKeys.map((key, i) => {
-    return {
-      label: key,
-      data: freq.map(p => p.frequencies[key]),
-      borderColor: COLORS[i % COLORS.length],
-      backgroundColor: COLORS[i % COLORS.length],
-      borderWidth: 2,
-      tension: 0.1,
-      pointRadius: 0
-    };
-  });
-  freqChart = updateChart(freqChart, chartId, datasets, labels, 'CPU Frequency (MHz)', labels.at(-1), stepSize);
+
+  const datasets = coreKeys.map((key, i) => ({
+    label: key,
+    data: freq.map(p => p.frequencies[key]),
+    borderColor: COLORS[i % COLORS.length],
+    backgroundColor: COLORS[i % COLORS.length],
+    borderWidth: 2,
+    tension: 0.1,
+    pointRadius: 0
+  }));
+
+  const canvasId = `${tabId}-freqChart`;
+  const chartCanvas = document.getElementById(canvasId);
+  if (!chartCanvas) {
+    console.warn(`⚠️ Freq chart canvas not found: ${canvasId}`);
+    return;
+  }
+
+  chartsByTabId[tabId] ||= {};
+  chartsByTabId[tabId].freqChart = updateChart(
+      chartsByTabId[tabId].freqChart,
+      canvasId,
+      datasets,
+      labels,
+      'CPU Frequency (MHz)',
+      labels.at(-1),
+      stepSize
+  );
 }
 
-function updateMemoryChart(telemetry, chartId) {
+
+function updateMemoryChart(telemetry, tabId) {
   const system = telemetry.system_memory || [];
   const app = telemetry.app_memory || [];
+  if (!system.length) return;
+
   const labels = system.map(p => p.elapsed_time);
   const appMap = Object.fromEntries(app.map(a => [a.elapsed_time, a.app_kb]));
   const stepSize = computeStepSize(labels.at(-1) || 0);
@@ -614,22 +642,51 @@ function updateMemoryChart(telemetry, chartId) {
       pointRadius: 0
     }
   ];
-  memoryChart = updateChart(memoryChart, chartId, datasets, labels, 'Memory Usage (MB)', labels.at(-1), stepSize);
+
+  const canvasId = `${tabId}-memoryChart`;
+  const chartCanvas = document.getElementById(canvasId);
+  if (!chartCanvas) {
+    console.warn(`⚠️ Memory chart canvas not found: ${canvasId}`);
+    return;
+  }
+
+  chartsByTabId[tabId] ||= {};
+  chartsByTabId[tabId].memoryChart = updateChart(
+      chartsByTabId[tabId].memoryChart,
+      canvasId,
+      datasets,
+      labels,
+      'Memory Usage (MB)',
+      labels.at(-1),
+      stepSize
+  );
 }
 
-function updateFrameDropChart(telemetry, chartId) {
+
+function updateFrameDropChart(telemetry, tabId) {
   const drops = telemetry.frame_drops || [];
+  if (!drops.length) return;
+
   const labels = drops.map(p => p.elapsed_time);
   const values = drops.map(p => p.delta_framedrops);
   const stepSize = computeStepSize(labels.at(-1) || 0);
-  frameDropChart = updateChart(
-    frameDropChart,
-    chartId,
-    [{ label: 'Frame Drops', data: values, borderWidth: 2 }],
-    labels,
-    'Dropped Frames',
-    labels.at(-1),
-    stepSize
+
+  const canvasId = `${tabId}-frameDropChart`;
+  const chartCanvas = document.getElementById(canvasId);
+  if (!chartCanvas) {
+    console.warn(`⚠️ Frame drop chart canvas not found: ${canvasId}`);
+    return;
+  }
+
+  chartsByTabId[tabId] ||= {};
+  chartsByTabId[tabId].frameDropChart = updateChart(
+      chartsByTabId[tabId].frameDropChart,
+      canvasId,
+      [{ label: 'Frame Drops', data: values, borderWidth: 2 }],
+      labels,
+      'Dropped Frames',
+      labels.at(-1),
+      stepSize
   );
 }
 
@@ -658,11 +715,11 @@ function fetchAndUpdateTelemetry() {
           updateTestDetailsUI({ test_details: testDetails }, tabId);
       }
 
-      updateCpuChart(telemetry, `${tabId}-cpuChart`, tabId);
-      updateBatteryChart(telemetry, `${tabId}-batteryChart`, tabId);
-      updateFreqChart(telemetry, `${tabId}-freqChart`, tabId);
-      updateMemoryChart(telemetry, `${tabId}-memoryChart`, tabId);
-      updateFrameDropChart(telemetry, `${tabId}-frameDropChart`, tabId);
+      updateCpuChart(telemetry, `${tabId}`, tabId);
+      updateBatteryChart(telemetry, `${tabId}`, tabId);
+      updateFreqChart(telemetry, `${tabId}`, tabId);
+      updateMemoryChart(telemetry, `${tabId}`, tabId);
+      updateFrameDropChart(telemetry, `${tabId}`, tabId);
 
     })
     .catch(err => console.error('❌ Telemetry fetch failed:', err));
@@ -856,10 +913,6 @@ function updateTestDetailsUI(data, tabId) {
         (curVideo.framerate !== undefined) ? curVideo.framerate.toFixed(1) : "";
   }
 }
-
-
-
-
 
 function sendControlCommand(cmd) {
   const url = `${API_BASE}/api/device/${cmd}?session=${session_token}&device=${selectedDevice}`;
@@ -1339,25 +1392,33 @@ async function pickExportPath() {
   }
 }
 
-function downloadLogFile(telemetryFilePath, mimetype) {
+async function LogFile(telemetryFilePath, outputPath) {
   const deviceSelect = document.getElementById("device");
   const selectedDeviceId = deviceSelect?.value;
 
-  if (!session_token || !selectedDeviceId || !telemetryFilePath || !mimetype) {
-    alert("Missing required data for download.");
-    return;
+  console.log("📤 Exporting telemetry:", JSON.stringify({
+    session: session_token,
+    device: selectedDeviceId,
+    telemetry_file_path: telemetryFilePath,
+    output_path: outputPath
+  }));
+
+  const res = await fetch('/api/vcat_monitor/export_telemetry_file', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      session: session_token,
+      device: selectedDeviceId,
+      telemetry_file_path: telemetryFilePath,
+      output_path: outputPath
+    })
+  });
+
+  if (res.ok) {
+    alert("Export successful!");
+  } else {
+    alert("Export failed.");
   }
-
-  const encodedPath = encodeURIComponent(telemetryFilePath);
-  const encodedMime = encodeURIComponent(mimetype);
-
-  const url = `/api/vcat_monitor/download_telemetry_file?session=${session_token}&device=${selectedDeviceId}&telemetry_file_path=${encodedPath}&mimetype=${encodedMime}`;
-
-  console.log("📥 Downloading telemetry file:");
-  console.log("➡️ URL:", url);
-
-  // Trigger browser download
-  window.open(url, "_blank");
 }
 
 
