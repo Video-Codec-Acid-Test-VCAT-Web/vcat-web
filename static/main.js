@@ -1392,7 +1392,7 @@ async function pickExportPath() {
   }
 }
 
-async function LogFile(telemetryFilePath, outputPath) {
+async function downloadLogFile(telemetryFilePath, outputPath) {
   const deviceSelect = document.getElementById("device");
   const selectedDeviceId = deviceSelect?.value;
 
@@ -1403,16 +1403,17 @@ async function LogFile(telemetryFilePath, outputPath) {
     output_path: outputPath
   }));
 
-  const res = await fetch('/api/vcat_monitor/export_telemetry_file', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      session: session_token,
-      device: selectedDeviceId,
-      telemetry_file_path: telemetryFilePath,
-      output_path: outputPath
-    })
+  const params = new URLSearchParams({
+    session: session_token,
+    device: selectedDeviceId,
+    telemetry_file_path: telemetryFilePath,
+    output_path: outputPath
   });
+
+  const res = await fetch(`/api/vcat_monitor/download_telemetry_file?${params.toString()}`, {
+    method: 'GET'
+  });
+
 
   if (res.ok) {
     alert("Export successful!");
