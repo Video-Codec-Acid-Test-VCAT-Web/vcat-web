@@ -22,10 +22,86 @@ __all__ = [
     "MemoryInfo",
     "parse_device_info",
     "TelemetryData",
+    "TestConditions",
     "TestDetails",
     "make_empty_telemetry_data"
 ]
 
+from dataclasses import dataclass
+from typing import Optional, Dict
+
+
+@dataclass
+class DecoderConfig:
+    video_avc: Optional[str] = None
+    video_hevc: Optional[str] = None
+    video_vp9: Optional[str] = None
+    video_av1: Optional[str] = None
+    video_vvc: Optional[str] = None
+
+    @staticmethod
+    def from_dict(d: Dict[str, str]) -> "DecoderConfig":
+        return DecoderConfig(
+            video_avc=d.get("video/avc"),
+            video_hevc=d.get("video/hevc"),
+            video_vp9=d.get("video/x-vnd.on2.vp9"),
+            video_av1=d.get("video/av01"),
+            video_vvc=d.get("video/vvc"),
+        )
+
+    def to_dict(self) -> Dict[str, str]:
+        result = {}
+        if self.video_avc: result["video/avc"] = self.video_avc
+        if self.video_hevc: result["video/hevc"] = self.video_hevc
+        if self.video_vp9: result["video/x-vnd.on2.vp9"] = self.video_vp9
+        if self.video_av1: result["video/av01"] = self.video_av1
+        if self.video_vvc: result["video/vvc"] = self.video_vvc
+        return result
+
+
+@dataclass
+class TestConditions:
+    decoderConfig: DecoderConfig
+    runLimit: int
+    runMode: str
+    screenBrightness: int
+    showVlcControls: bool
+    threads: int
+
+    @staticmethod
+    def empty() -> "TestConditions":
+        return TestConditions(
+            decoderConfig=DecoderConfig(),  # all fields None by default
+            runLimit=0,
+            runMode="",
+            screenBrightness=0,
+            showVlcControls=False,
+            threads=0
+        )
+
+    @staticmethod
+    def from_dict(d: Dict) -> "TestConditions":
+        decoder_dict = d.get("decoderCfg", {}).get("decoderConfig", {})
+        return TestConditions(
+            decoderConfig=DecoderConfig.from_dict(decoder_dict),
+            runLimit=d["runLimit"],
+            runMode=d["runMode"],
+            screenBrightness=d["screenBrightness"],
+            showVlcControls=d["showVlcControls"],
+            threads=d["threads"]
+        )
+
+    def to_dict(self) -> Dict:
+        return {
+            "decoderCfg": {
+                "decoderConfig": self.decoderConfig.to_dict()
+            },
+            "runLimit": self.runLimit,
+            "runMode": self.runMode,
+            "screenBrightness": self.screenBrightness,
+            "showVlcControls": self.showVlcControls,
+            "threads": self.threads
+        }
 
 @dataclass
 class CoreInfo:
@@ -129,8 +205,8 @@ class DeviceInfo:
 
 @dataclass
 class BatteryEntry:
-    elapsed_time: float
-    level: float
+    elapsed_time: float = 0.0
+    level: float = 0
     current_ma: float = 0
     charge_count: int = 0
     battery_temp : float = 0
@@ -182,7 +258,6 @@ class TestDetails:
     playlist: str = ""
     currentTestVideo: CurrentTestVideo = field(default_factory=CurrentTestVideo)
 
-
 @dataclass
 class TelemetryData:
     owner_session_id: str
@@ -190,6 +265,8 @@ class TelemetryData:
     device_ipaddr: str
     device_info: DeviceInfo
     start_time: float
+    start_battery: BatteryEntry
+    test_conditions: TestConditions
     test_details: TestDetails
     battery_data: list[BatteryEntry]
     system_memory: list[MemoryEntry]
@@ -210,6 +287,8 @@ def make_empty_telemetry_data() -> TelemetryData:
     obj.device_ipaddr = ""
     obj.device_info = DeviceInfo()  
     obj.start_time = 0.0
+    obj.start_battery = BatteryEntry()
+    obj.test_conditions = TestConditions.empty()
     obj.test_details = TestDetails()
     obj.battery_data = []
     obj.system_memory = []

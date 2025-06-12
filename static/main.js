@@ -797,7 +797,12 @@ function chartOptions(yLabel, latestTime, stepSize) {
 const API_RUN_CONFIG = '/api/device/run_config';
 // Modal control for Run Config
 function openRunConfigModal() {
-    fetch(`${API_RUN_CONFIG}?session=${session_token}&device=${selectedDevice}`)
+
+  const deviceSelect = document.getElementById("device");
+  const selectedDeviceId = deviceSelect?.value;
+  if (!selectedDeviceId) return;
+
+    fetch(`${API_RUN_CONFIG}?session=${session_token}&device=${selectedDeviceId}`)
 
     .then(res => res.json())
     .then(config => {
@@ -828,8 +833,13 @@ function openRunConfigModal() {
 }
 
 function renderRunConfigUI(config) {
-  const container = document.getElementById("run-config-body");
-  container.innerHTML = ''; // Clear previous content
+  const container = document.getElementById("run-config-modal-content");
+  if (!container) {
+    console.error("❌ Missing modal container");
+    return;
+  }
+
+  container.innerHTML = '';
 
   const section = document.createElement("div");
   section.innerHTML = `
@@ -1392,34 +1402,48 @@ async function pickExportPath() {
   }
 }
 
-async function downloadLogFile(telemetryFilePath, outputPath) {
+async function downloadLogFile(telemetryFilePath, mimetype) {
   const deviceSelect = document.getElementById("device");
   const selectedDeviceId = deviceSelect?.value;
-
-  console.log("📤 Exporting telemetry:", JSON.stringify({
-    session: session_token,
-    device: selectedDeviceId,
-    telemetry_file_path: telemetryFilePath,
-    output_path: outputPath
-  }));
 
   const params = new URLSearchParams({
     session: session_token,
     device: selectedDeviceId,
     telemetry_file_path: telemetryFilePath,
-    output_path: outputPath
+    mimetype: mimetype
   });
 
-  const res = await fetch(`/api/vcat_monitor/download_telemetry_file?${params.toString()}`, {
-    method: 'GET'
-  });
+  try {
+    const res = await fetch(`/api/vcat_monitor/download_telemetry_file?${params.toString()}`, {
+      method: 'GET'
+    });
 
+    if (!res.ok) {
+      alert("Export failed.");
+      return;
+    }
 
-  if (res.ok) {
+    const blob = await res.blob();
+
+    // Use telemetryFilePath basename + extension based on MIME
+    const baseName = telemetryFilePath?.split('/').pop()?.split('.').shift() || "telemetry_export";
+    const ext = mimetype === "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        ? ".xlsx"
+        : ".csv";
+    const filename = baseName + ext;
+
+    const url = window.URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    window.URL.revokeObjectURL(url);
+
     alert("Export successful!");
-  } else {
+  } catch (err) {
+    console.error("Download error:", err);
     alert("Export failed.");
   }
 }
-
-

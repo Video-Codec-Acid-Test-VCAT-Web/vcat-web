@@ -16,9 +16,12 @@ import json
 from typing import List, Tuple
 
 
+import json
+from typing import List, Tuple, Optional
+
 def extract_json_object_from_lines(
     lines: List[str], start_row: int = 0
-) -> Tuple[dict, int]:
+) -> Tuple[Optional[dict], int]:
     json_lines = []
     brace_balance = 0
     json_started = False
@@ -26,9 +29,8 @@ def extract_json_object_from_lines(
     for i in range(start_row, len(lines)):
         line = lines[i]
 
-        if not json_started:
-            if "{" in line:
-                json_started = True
+        if not json_started and "{" in line:
+            json_started = True
 
         if json_started:
             brace_balance += line.count("{")
@@ -39,11 +41,20 @@ def extract_json_object_from_lines(
                 json_str = "".join(json_lines).strip()
                 try:
                     obj = json.loads(json_str)
-                    return obj, i + 1  # return object and index of next line
-                except json.JSONDecodeError as e:
-                    raise ValueError(f"Failed to parse JSON at line {i}: {e}")
+                    if isinstance(obj, dict):
+                        return obj, i + 1
+                    else:
+                        # Parsed JSON, but it's not a dict
+                        return None, i + 1
+                except json.JSONDecodeError:
+                    raise ValueError(f"Failed to parse JSON at line {i}")
 
-    raise ValueError("JSON object not closed before end of lines")
+    # If we saw a `{` but didn't close it, it's malformed
+    if json_started:
+        raise ValueError("JSON object not closed before end of lines")
+
+    # No JSON was found at all
+    return {}, len(lines)
 
 
 def _read_telemetry_dicts(filepath) -> Tuple[List[dict], List[str]]:
@@ -144,6 +155,16 @@ def _read_timestamp(row) -> int:
     )  # Handles integers and float strings like "1716308013.245"
 
 
+def identify_blob_type(blob: dict) -> Optional[str]:
+    first_key = next(iter(blob), None)
+    if first_key == "manufacturer":
+        return "device_info"
+    elif first_key == "playlist":
+        return "test_details"
+    elif first_key == "test_conditions":
+        return "test_conditions"
+    return None
+
 def read_telemetry_data(session_id, telemetry_file) -> TelemetryData:
 
     # code here
@@ -157,14 +178,25 @@ def read_telemetry_data(session_id, telemetry_file) -> TelemetryData:
 
     rows, preamble_lines = _read_telemetry_dicts(telemetry_file)
 
-    device_info_json, next_row = extract_json_object_from_lines(preamble_lines, 0)
-    device_info = DeviceInfo.from_dict(
-        device_info_json,
-    )
+    next_row = 0
+    device_info = DeviceInfo()
+    test_details = TestDetails()
+    test_conditions = TestConditions.empty()
 
-    test_details_json, next_row = extract_json_object_from_lines(
-        preamble_lines, next_row
-    )
+    while next_row < len(preamble_lines):
+        start_row = next_row
+        cur_json, next_row = extract_json_object_from_lines(preamble_lines, next_row)
+
+        first_key = identify_blob_type(cur_json)
+
+        if first_key == "device_info":
+            device_info = DeviceInfo.from_dict(cur_json)
+        elif first_key == "test_details":
+            test_details_json = cur_json
+        elif first_key == "test_conditions":
+            test_conditions = TestConditions.from_dict(cur_json)
+        else:
+            print(f"Unknown blob type at line {start_row}")
 
     start_time = _read_timestamp(rows[0])
 
@@ -209,6 +241,7 @@ def read_telemetry_data(session_id, telemetry_file) -> TelemetryData:
     telemetry.cpu_freq = cpu_freq
     telemetry.cpu_usage = cpu_usage
     telemetry.frame_drops = frame_drops
+    telemetry.test_conditions = test_conditions
     telemetry.test_details = test_details
 
     return telemetry
