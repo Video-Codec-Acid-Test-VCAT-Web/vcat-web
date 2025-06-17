@@ -21,6 +21,7 @@ __all__ = [
     "MemoryEntry",
     "MemoryInfo",
     "parse_device_info",
+    "SessionInfo",
     "TelemetryData",
     "TestConditions",
     "TestDetails",
@@ -258,12 +259,78 @@ class TestDetails:
     playlist: str = ""
     currentTestVideo: CurrentTestVideo = field(default_factory=CurrentTestVideo)
 
+
+@dataclass
+class SessionBatteryInfo:
+    capacity_ma: float = 0.0
+    initial_level_ma: float = 0.0
+    initial_level_pct: float = 0.0
+
+    @staticmethod
+    def from_dict(d: dict) -> "SessionBatteryInfo":
+        return SessionBatteryInfo(
+            capacity_ma=d.get("capacity_ma", 0.0),
+            initial_level_ma=d.get("initial_level_ma", 0.0),
+            initial_level_pct=d.get("initial_level_pct", 0.0),
+        )
+
+
+@dataclass
+class StartTime:
+    unix_time_ms: float = 0.0
+    local_date: str = ""
+    local_time: str = ""
+
+    @staticmethod
+    def from_dict(d: dict) -> "StartTime":
+        return StartTime(
+            unix_time_ms=d.get("unix_time_ms", 0.0),
+            local_date=d.get("local_date", ""),
+            local_time=d.get("local_time", ""),
+        )
+
+
+@dataclass
+class SessionInfo:
+    playlist: str = ""
+    vcat_version: str = ""
+    battery: SessionBatteryInfo = SessionBatteryInfo()
+    start_time: StartTime = StartTime()
+
+    @staticmethod
+    def from_dict(d: dict) -> "SessionInfo":
+        return SessionInfo(
+            playlist=d.get("playlist", ""),
+            vcat_version=d.get("vcat_version", ""),
+            battery=SessionBatteryInfo.from_dict(d.get("battery", {})),
+            start_time=StartTime.from_dict(d.get("start_time", {})),
+        )
+
+    def to_dict(self) -> dict:
+        return {
+            "playlist": self.playlist,
+            "vcat_version": self.vcat_version,
+            "battery": {
+                "capacity_ma": self.battery.capacity_ma,
+                "initial_level_ma": self.battery.initial_level_ma,
+                "initial_level_pct": self.battery.initial_level_pct,
+            },
+            "start_time": {
+                "unix_time_ms": self.start_time.unix_time_ms,
+                "local_date": self.start_time.local_date,
+                "local_time": self.start_time.local_time,
+            }
+        }
+
+
 @dataclass
 class TelemetryData:
+    version: int
     owner_session_id: str
     device_id: str
     device_ipaddr: str
     device_info: DeviceInfo
+    session_info: SessionInfo
     start_time: float
     start_battery: BatteryEntry
     test_conditions: TestConditions
@@ -281,11 +348,12 @@ def make_empty_telemetry_data() -> TelemetryData:
     # Explicitly cast to avoid Pyright confusion
     obj = cast(TelemetryData, obj)
 
-
+    obj.version = -1
     obj.owner_session_id = ""
     obj.device_id = ""
     obj.device_ipaddr = ""
-    obj.device_info = DeviceInfo()  
+    obj.device_info = DeviceInfo()
+    obj.session_info = SessionInfo()
     obj.start_time = 0.0
     obj.start_battery = BatteryEntry()
     obj.test_conditions = TestConditions.empty()
@@ -348,3 +416,4 @@ class LRUCache(OrderedDict, Generic[K, V]):
             self.move_to_end(key)
             return super().get(key)  # type: ignore
         return default
+

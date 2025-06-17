@@ -3,78 +3,60 @@ from vcat_telemetry_data_models import *
 import os
 import re
 from datetime import datetime
-from typing import Dict, Generic, List, Optional, OrderedDict, Tuple, TypeVar, Union
+from io import StringIO
+__all__ = ["read_telemetry_data"]
+import json
+from typing import List, Optional
 
 path = "/storage/emulated/0/Download/f720p-p7-crf50-av1-fd2.mp4"
 filename = os.path.basename(path)
 print(filename)
 
+def parse_json_header(preamble_lines: list[str]) -> tuple[int, dict, dict, dict]:
+    """
+    Parses the entire preamble as a single JSON blob.
+    Returns (header_version, device_info, session_info, test_conditions).
+    If no 'header_version' is present, treats it as invalid.
+    """
+    try:
+        raw_json = json.loads("".join(preamble_lines))
+        if "header_version" not in raw_json:
+            return 0, {}, {}, {}
 
-__all__ = ["read_telemetry_data"]
+        return (
+            raw_json.get("header_version", 0),
+            raw_json.get("device_info", {}),
+            raw_json.get("session_info", {}),
+            raw_json.get("test_conditions", {}),
+        )
+    except Exception as e:
+        print(f"[warn] Failed to parse JSON header: {e}")
+        return 0, {}, {}, {}
 
-import json
-from typing import List, Tuple
+def _read_telemetry_dicts(file_path: str) -> tuple[list[dict], int, DeviceInfo, SessionInfo, TestConditions]:
+    with open(file_path, "r", encoding="utf-8") as f:
+        lines = f.readlines()
 
+    preamble_lines = []
+    data_start_index = 0
 
-import json
-from typing import List, Tuple, Optional
+    for i, line in enumerate(lines):
+        if line.strip().startswith("test.timestamp"):
+            data_start_index = i
+            break
+        preamble_lines.append(line)
 
-def extract_json_object_from_lines(
-    lines: List[str], start_row: int = 0
-) -> Tuple[Optional[dict], int]:
-    json_lines = []
-    brace_balance = 0
-    json_started = False
+    header_version, device_raw, session_raw, test_raw = parse_json_header(preamble_lines)
 
-    for i in range(start_row, len(lines)):
-        line = lines[i]
+    device_details = DeviceInfo.from_dict(device_raw)
+    session_info = SessionInfo.from_dict(session_raw)
+    test_conditions = TestConditions.from_dict(test_raw)
 
-        if not json_started and "{" in line:
-            json_started = True
+    data_lines = lines[data_start_index:]
+    rows = list(csv.DictReader(StringIO("".join(data_lines))))
 
-        if json_started:
-            brace_balance += line.count("{")
-            brace_balance -= line.count("}")
-            json_lines.append(line)
+    return rows, header_version, device_details, session_info, test_conditions
 
-            if brace_balance == 0:
-                json_str = "".join(json_lines).strip()
-                try:
-                    obj = json.loads(json_str)
-                    if isinstance(obj, dict):
-                        return obj, i + 1
-                    else:
-                        # Parsed JSON, but it's not a dict
-                        return None, i + 1
-                except json.JSONDecodeError:
-                    raise ValueError(f"Failed to parse JSON at line {i}")
-
-    # If we saw a `{` but didn't close it, it's malformed
-    if json_started:
-        raise ValueError("JSON object not closed before end of lines")
-
-    # No JSON was found at all
-    return {}, len(lines)
-
-
-def _read_telemetry_dicts(filepath) -> Tuple[List[dict], List[str]]:
-    with open(filepath, newline="") as f:
-
-        preamble_lines = []
-        # Find the header line
-        for line in f:
-            if "test.timestamp" in line:
-                header_line = line.strip()
-                break
-
-            preamble_lines.append(line)
-        else:
-            raise ValueError(f"No header found in [(filepath)]")
-
-        # Now use DictReader from that point on
-        reader = csv.DictReader(f, fieldnames=header_line.split(","))
-        rows = list(reader)
-        return rows, preamble_lines
 
 
 def parse_float(value) -> float:
@@ -176,27 +158,11 @@ def read_telemetry_data(session_id, telemetry_file) -> TelemetryData:
     cpu_freq: List[CpuFreguencyEntry] = []
     cpu_usage: List[CpuUsageEntry] = []
 
-    rows, preamble_lines = _read_telemetry_dicts(telemetry_file)
+    rows, header_version, device_info, session_info, test_conditions = _read_telemetry_dicts(telemetry_file)
 
-    next_row = 0
-    device_info = DeviceInfo()
-    test_details = TestDetails()
-    test_conditions = TestConditions.empty()
-
-    while next_row < len(preamble_lines):
-        start_row = next_row
-        cur_json, next_row = extract_json_object_from_lines(preamble_lines, next_row)
-
-        first_key = identify_blob_type(cur_json)
-
-        if first_key == "device_info":
-            device_info = DeviceInfo.from_dict(cur_json)
-        elif first_key == "test_details":
-            test_details_json = cur_json
-        elif first_key == "test_conditions":
-            test_conditions = TestConditions.from_dict(cur_json)
-        else:
-            print(f"Unknown blob type at line {start_row}")
+    # handle unsupported versions of header
+    if header_version < 32:
+        raise ValueError("Missing or unsupported header version")
 
     start_time = _read_timestamp(rows[0])
 
@@ -227,13 +193,15 @@ def read_telemetry_data(session_id, telemetry_file) -> TelemetryData:
     test_details = TestDetails(
         testState="Completed",
         startTime=test_start_time,
-        playlist=test_details_json["playlist"],
+        playlist=session_info.playlist,
         currentTestVideo=current_video,
     )
 
     telemetry = make_empty_telemetry_data()
+    telemetry.version = header_version
     telemetry.owner_session_id = session_id
     telemetry.device_info = device_info
+    telemetry.session_info = session_info
     telemetry.start_time = start_time
     telemetry.battery_data = battery_data
     telemetry.system_memory = system_memory

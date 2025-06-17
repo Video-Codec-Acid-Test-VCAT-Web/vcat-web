@@ -59,7 +59,7 @@ def export_telemetry(
     append_telemetry(
         session_id,
         TelemetrySheet.BATTERY,
-        [[entry.elapsed_time, entry.level] for entry in telemetry_data.battery_data],
+        [[entry.elapsed_time, entry.level, entry.charge_count, entry.current_ma, entry.battery_temp] for entry in telemetry_data.battery_data],
     )
 
     if telemetry_data.system_memory and telemetry_data.app_memory:
@@ -155,9 +155,19 @@ def create_telemetry_excel_at_path(
 
     # Write device info into the SUMMARY sheet
     device_info_dict = telemetry_data.device_info.to_dict()
+    session_info_dict = telemetry_data.session_info.to_dict()
+    test_conditions_dict = telemetry_data.test_conditions.to_dict()
+
+    header_dict = {
+        "header_version": telemetry_data.version,
+        "device_info": device_info_dict,
+        "session_info": session_info_dict,
+        "test_conditions": test_conditions_dict,
+    }
+
     summary_sheet = sheet
 
-    device_info_json = json.dumps(device_info_dict, indent=1, sort_keys=True)
+    device_info_json = json.dumps(header_dict, indent=1, sort_keys=False)
 
     for line in device_info_json.splitlines():
         summary_sheet.append([line])
@@ -177,7 +187,7 @@ def create_telemetry_excel_at_path(
         f"cpu{core.core_id}" for core in telemetry_data.device_info.cpu.cores
     ]
 
-    wb[TelemetrySheet.BATTERY.value].append(["Elapsed Time (s)", "Battery Level (%)"])
+    wb[TelemetrySheet.BATTERY.value].append(["Elapsed Time (s)", "battery.level (%)", "battery.charge_counter", "battery.milliamps", "battery.temperature"])
     wb[TelemetrySheet.CPU_USAGE.value].append(
         ["Elapsed Time (s)", "total"] + ccore_labels
     )
