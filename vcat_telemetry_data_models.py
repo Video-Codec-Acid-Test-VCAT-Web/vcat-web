@@ -294,8 +294,8 @@ class StartTime:
 class SessionInfo:
     playlist: str = ""
     vcat_version: str = ""
-    battery: SessionBatteryInfo = SessionBatteryInfo()
-    start_time: StartTime = StartTime()
+    battery: SessionBatteryInfo = field(default_factory=SessionBatteryInfo)
+    start_time: StartTime = field(default_factory=StartTime)
 
     @staticmethod
     def from_dict(d: dict) -> "SessionInfo":

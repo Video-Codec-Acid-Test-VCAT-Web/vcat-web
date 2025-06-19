@@ -444,11 +444,14 @@ def resetTelemetry(session_id, device_id):
     now = time.time()
 
     telemetry_data = TelemetryData(
+        version=0,
         owner_session_id=session_id,
         device_id=device_id,
         device_ipaddr=ipAddr,
         device_info=DeviceInfo(),
         start_time=time.time(),
+        test_conditions=TestConditions.empty(),
+        start_battery=BatteryEntry(),
         test_details=TestDetails(),
         battery_data=[],
         system_memory=[],
@@ -456,6 +459,7 @@ def resetTelemetry(session_id, device_id):
         frame_drops=[],
         cpu_freq=[],
         cpu_usage=[],
+        session_info=SessionInfo()
     )
 
     # ✅ Reset telemetry for the given device
