@@ -865,7 +865,7 @@ def get_device_file(
         if not os.path.isdir(local_dir) or not os.access(local_dir, os.W_OK):
             raise Exception(f"Directory '{local_dir}' is not writable")
 
-    adb_cmd = cmd = ["adb", "pull", device_file_path, local_path]
+    adb_cmd = ["adb", "-s", device_id, "pull", device_file_path, local_path]
 
     vcat_adb.run_adb_command_with_log(session_id, device_id, adb_cmd)
     return local_path
