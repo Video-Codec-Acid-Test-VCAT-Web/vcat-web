@@ -28,6 +28,7 @@ __all__ = [
 # Sheet name enum for safe usage
 class TelemetrySheet(str, Enum):
     SUMMARY = "Summary"
+    THERMAL = "Thermal"
     BATTERY = "Battery"
     CPU_USAGE = "CPU Usage"
     CPU_FREQ = "CPU Frequency"
@@ -55,6 +56,12 @@ def export_telemetry(
 ) -> str:
 
     create_telemetry_excel_at_path(telemetry_data, output_path)
+
+    append_telemetry(
+        session_id,
+        TelemetrySheet.THERMAL,
+        [[entry.elapsed_time, entry.status] for entry in telemetry_data.system_thermal_status],
+    )
 
     append_telemetry(
         session_id,
@@ -175,6 +182,7 @@ def create_telemetry_excel_at_path(
     summary_sheet.append([])
 
     for sheet_name in [
+        TelemetrySheet.THERMAL.value,
         TelemetrySheet.BATTERY.value,
         TelemetrySheet.CPU_USAGE.value,
         TelemetrySheet.CPU_FREQ.value,
@@ -186,6 +194,10 @@ def create_telemetry_excel_at_path(
     ccore_labels = [
         f"cpu{core.core_id}" for core in telemetry_data.device_info.cpu.cores
     ]
+
+    wb[TelemetrySheet.THERMAL.value].append(
+        ["Elapsed Time (s)", "Status"]
+    )
 
     wb[TelemetrySheet.BATTERY.value].append(["Elapsed Time (s)", "battery.level (%)", "battery.charge_counter", "battery.milliamps", "battery.temperature"])
     wb[TelemetrySheet.CPU_USAGE.value].append(

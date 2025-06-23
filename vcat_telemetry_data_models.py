@@ -25,6 +25,7 @@ __all__ = [
     "TelemetryData",
     "TestConditions",
     "TestDetails",
+    "SystemThermalStatus",
     "make_empty_telemetry_data"
 ]
 
@@ -239,6 +240,11 @@ class CpuFreguencyEntry:
     elapsed_time: float = 0.0
     frequencies: Dict[str, int] = field(default_factory=dict)
 
+@dataclass
+class SystemThermalStatus:
+    elapsed_time: float = 0.0
+    status: int = 0
+
 
 @dataclass
 class CurrentTestVideo:
@@ -335,6 +341,7 @@ class TelemetryData:
     start_battery: BatteryEntry
     test_conditions: TestConditions
     test_details: TestDetails
+    system_thermal_status: list[SystemThermalStatus]
     battery_data: list[BatteryEntry]
     system_memory: list[MemoryEntry]
     app_memory: list[MemoryEntry]
@@ -358,6 +365,7 @@ def make_empty_telemetry_data() -> TelemetryData:
     obj.start_battery = BatteryEntry()
     obj.test_conditions = TestConditions.empty()
     obj.test_details = TestDetails()
+    obj.system_thermal_status = []
     obj.battery_data = []
     obj.system_memory = []
     obj.app_memory = []

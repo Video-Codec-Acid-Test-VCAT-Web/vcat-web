@@ -453,6 +453,7 @@ def resetTelemetry(session_id, device_id):
         test_conditions=TestConditions.empty(),
         start_battery=BatteryEntry(),
         test_details=TestDetails(),
+        system_thermal_status = SystemThermalStatus(),
         battery_data=[],
         system_memory=[],
         app_memory=[],
