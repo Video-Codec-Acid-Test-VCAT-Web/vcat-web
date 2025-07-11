@@ -211,7 +211,6 @@ function handleConnectClick(source) {
   if (isLive) {
     // ✅ Live telemetry setup
     if (!window.telemetryInterval) {
-      renderTelemetryTab("telemetry");
       setTimeout(() => {
         waitForChartAndStartPolling();  // ← now canvas is in DOM
       }, 100);
@@ -242,7 +241,6 @@ function handleConnectClick(source) {
     fetch(url)
         .then(res => res.json())
         .then(data => {
-          setupTelemetryCanvas(tabId);
           const telemetry = data.telemetry_data;
           const testDetails = data.test_details;
 

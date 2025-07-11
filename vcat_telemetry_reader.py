@@ -7,6 +7,7 @@ from io import StringIO
 __all__ = ["read_telemetry_data"]
 import json
 from typing import List, Optional
+import vcat_logging
 
 path = "/storage/emulated/0/Download/f720p-p7-crf50-av1-fd2.mp4"
 filename = os.path.basename(path)
@@ -178,9 +179,17 @@ def read_telemetry_data(session_id, telemetry_file) -> TelemetryData:
 
     test_start_time = datetime.fromtimestamp(start_time / 1000.0).isoformat()
 
+    filename = rows[0].get(
+        "video.filename",
+        rows[0].get("test.filename", "invalid")
+    )
+    if filename == "invalid":
+        # handle missing filename case explicitly:
+        vcat_logging.logger.warning("Log row missing filename field")
+
     # build test details
     current_video = CurrentTestVideo(
-        fileName=os.path.basename(rows[0]["video.filename"]),
+        fileName=os.path.basename(filename),
         startTime=test_start_time,
         videoCodec=rows[0]["video.codec_name"],
         videoDecoder=rows[0]["video.decoder_name"],
