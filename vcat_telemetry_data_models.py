@@ -67,7 +67,6 @@ class TestConditions:
     runLimit: int
     runMode: str
     screenBrightness: int
-    showVlcControls: bool
     threads: int
 
     @staticmethod
@@ -77,7 +76,6 @@ class TestConditions:
             runLimit=0,
             runMode="",
             screenBrightness=0,
-            showVlcControls=False,
             threads=0
         )
 
@@ -89,7 +87,6 @@ class TestConditions:
             runLimit=d["runLimit"],
             runMode=d["runMode"],
             screenBrightness=d["screenBrightness"],
-            showVlcControls=d["showVlcControls"],
             threads=d["threads"]
         )
 
@@ -101,7 +98,6 @@ class TestConditions:
             "runLimit": self.runLimit,
             "runMode": self.runMode,
             "screenBrightness": self.screenBrightness,
-            "showVlcControls": self.showVlcControls,
             "threads": self.threads
         }
 

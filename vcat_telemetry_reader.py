@@ -162,7 +162,7 @@ def read_telemetry_data(session_id, telemetry_file) -> TelemetryData:
     rows, header_version, device_info, session_info, test_conditions = _read_telemetry_dicts(telemetry_file)
 
     # handle unsupported versions of header
-    if header_version < 32:
+    if header_version < 2:
         raise ValueError("Missing or unsupported header version")
 
     start_time = _read_timestamp(rows[0])
