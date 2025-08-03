@@ -294,9 +294,24 @@ fieldset.current-test-video input {
   font-size: 12px;
 }
 
+/* keep font sizing on both */
 .test-details-top label,
 .test-details-top input {
-  font-size: 12px;
+    font-size: 12px;
+}
+
+/* now style only the inputs */
+.test-details-top input {
+    background: black;
+    color: white;
+    border: none;
+    padding: 4px 8px;
+}
+
+/* make just the playlist field 50% wider */
+.test-details-top input.test-playlist {
+    width: 150%;
+    max-width: none;
 }
 
 .current-test-video {
@@ -313,59 +328,40 @@ fieldset.current-test-video input {
   padding: 0 8px;
 }
 
-.test-video-grid {
-  display: flex;
-  gap: 40px; /* spacing between left and right columns */
+/* 1) Single-column list with almost no vertical gap */
+.test-video-list {
+    display: grid;
+    grid-template-columns: 1fr;
+    row-gap: 0px;      /* no gap between rows */
 }
 
-.test-video-column {
-  display: flex;
-  flex-direction: column;
-  flex: 1;
+/* 2) Each row: zero margins and minimal padding */
+.test-video-row {
+    display: flex;
+    align-items: center;
+    margin: 0;         /* remove bottom margin entirely */
+    padding: 0;        /* remove any extra padding */
+    line-height: 1;    /* collapse line height */
 }
+
+/* 3) Shrink input padding to the bare minimum */
+.test-video-row input {
+    padding: 1px 2px;  /* tiny padding so text isn’t cut off */
+    font-size: 12px;   /* keep your font size */
+    background: black;
+    color: white;
+    border: none;
+}
+
+/* 4) Label sizing (if you want them even closer to inputs) */
+.test-video-row label {
+    width: 80px;       /* or whatever you need */
+    margin-right: 4px; /* tighten the gap to the input */
+    font-size: 12px;
+}
+
 
 /* Common row styling */
-.test-video-row {
-  display: flex;
-  align-items: center;
-  margin-bottom: 8px;
-}
-
-/* Left Column */
-.left-column label {
-  width: 50px; /* ⬅️ shorter label width for left side */
-  text-align: left;
-  margin-right: 8px;
-  font-size: 12px;
-}
-
-.left-column input {
-  flex: 1;
-  background: black;
-  color: white;
-  border: none;
-
-  font-size: 12px;
-  width: 220px;
-}
-
-/* Right Column */
-.right-column label {
-  width: 60px; /* ⬅️ longer label width for right side */
-  text-align: left;
-  margin-right: 2px;
-  font-size: 12px;
-}
-
-.right-column input {
-  flex: 0.8; /* slightly smaller input for right side */
-  background: black;
-  color: white;
-  border: none;
-  padding: 4px 8px;
-  font-size: 12px;
-  width: 40px;
-}
 
 /* Shared base styles */
 .test-video-grid {

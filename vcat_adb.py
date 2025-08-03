@@ -40,7 +40,7 @@ MAX_CONSOLE_LINES = 500
 
 
 BROADCAST_COMMANDS = {
-    "log_http_port": "org.videolan.vcat.ADB_LOG_HTTP_INFO",
+    "log_http_port": "com.roncatech.vcat.ADB_LOG_HTTP_INFO",
 }
 
 
@@ -280,7 +280,7 @@ def get_system_memory(device_id):
     return mem_total, mem_used
 
 
-def get_app_memory(device_id, package="org.videolan.vlc"):
+def get_app_memory(device_id, package="com.roncatech.vcat"):
     try:
         result = subprocess.run(
             ["adb", "-s", device_id, "shell", "dumpsys", "meminfo", package],

@@ -897,6 +897,15 @@ function handleRunConfigOutsideClick(event) {
   }
 }
 
+/**
+ * Strip off everything up to the last slash/backslash
+ * @param {string} fullPath
+ * @returns {string} just the file name (or empty string)
+ */
+function getFileName(fullPath) {
+  return (fullPath || "").replace(/^.*[\\/]/, "");
+}
+
 function updateTestDetailsUI(data, tabId) {
   const tabRoot = document.getElementById(`${tabId}-tab`);
   if (!tabRoot || !data.test_details) return;
@@ -904,14 +913,17 @@ function updateTestDetailsUI(data, tabId) {
   const details = data.test_details;
   const curVideo = details.currentTestVideo;
 
+  playlistFileName = getFileName(details.playlist || "")
+
   // Top-level test info
   tabRoot.querySelector(".test-state").value = details.testState || "";
   tabRoot.querySelector(".test-start-time").value = details.startTime || "";
-  tabRoot.querySelector(".test-playlist").value = details.playlist || "";
+  tabRoot.querySelector(".test-playlist").value = playlistFileName;
 
   if (curVideo) {
+    curVideoFileName = getFileName(curVideo.fileName || "");
     tabRoot.querySelector(".current-start-time").value = curVideo.startTime || "";
-    tabRoot.querySelector(".test-file").value = curVideo.fileName || "";
+    tabRoot.querySelector(".test-file").value = curVideoFileName;
     tabRoot.querySelector(".test-codec").value = curVideo.videoCodec || "";
     tabRoot.querySelector(".test-decoder").value = curVideo.videoDecoder || "";
     tabRoot.querySelector(".test-resolution").value = curVideo.resolution || "";

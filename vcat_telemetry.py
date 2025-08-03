@@ -782,7 +782,7 @@ def api_reset_session_console_log(session_id):
 
 
 def is_vcat_running(session_id: str, device_id: str) -> bool:
-    package = "org.videolan.vcat"
+    package = "com.roncatech.vcat"
     cmd = ["adb", "-s", device_id, "shell", "pidof", package]
     output = vcat_adb.run_adb_command_with_log(session_id, device_id, cmd)
     return bool(output and output.strip())
@@ -798,7 +798,7 @@ def launch_vcat(session_id: str, device_id: str) -> Tuple[bool, bool]:
     if is_vcat_running(session_id, device_id):
         return False, True
 
-    package = "org.videolan.vcat"
+    package = "com.roncatech.vcat"
     cmd = [
         "adb",
         "-s",
