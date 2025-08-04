@@ -932,6 +932,8 @@ function updateTestDetailsUI(data, tabId) {
     tabRoot.querySelector(".test-framerate").value =
         (curVideo.framerate !== undefined) ? curVideo.framerate.toFixed(1) : "";
   }
+
+  updatePlayerControlsState(tabId);
 }
 
 function sendControlCommand(cmd) {
@@ -986,6 +988,7 @@ function resetTelemetry() {
     }
     
     resetTestStatus();
+    updatePlayerControlsState();
 
     // Clear existing chart data immediately
     if (batteryChart) {
@@ -1056,27 +1059,19 @@ function confirmWirelessAdb() {
     });
 }
 
-function updatePlayerControlsState() {
-    const state = document.getElementById("test-state").value;
-    const shouldEnable = (state === "Running");
+function updatePlayerControlsState(tabId) {
+    const tabRoot = document.getElementById(`${tabId}-tab`);
+    if (!tabRoot) return;
 
-    const controls = [
-        "btn-play-pause",
-        "btn-video-stats",
-        "btn-stop-test",
-    ];
+    const state = tabRoot.querySelector(".test-state").value;
+    const enabled = (state === "Running");
 
-    controls.forEach((id) => {
-        const btn = document.getElementById(id);
-        if (shouldEnable) {
-            btn.style.pointerEvents = "auto";
-            btn.style.opacity = "1.0";
-            btn.style.cursor = "pointer";
-        } else {
-            btn.style.pointerEvents = "none";
-            btn.style.opacity = "0.4";
-            btn.style.cursor = "not-allowed";
-        }
+    ["btn-play-pause","btn-video-stats","btn-stop-test"].forEach(cls => {
+      const btn = tabRoot.querySelector(`.${cls}`);
+      if (!btn) return;
+      btn.style.pointerEvents = enabled ? "auto" : "none";
+      btn.style.opacity       = enabled ? "1.0"  : "0.4";
+      btn.style.cursor        = enabled ? "pointer" : "not-allowed";
     });
 }
 
