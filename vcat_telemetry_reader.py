@@ -123,13 +123,19 @@ def _read_frame_drops(elapsed_time: float, row: dict) -> FramedropEntry:
 
 
 def _read_system_memory(elapsed_time: float, row: dict):
+    value = row.get("test.memory.system")
+    if value is None:
+        raise ValueError("Missing 'test.memory.system'")
 
-    return MemoryEntry(elapsed_time=elapsed_time, used_kb=0)
+    return MemoryEntry(elapsed_time=elapsed_time, used_kb=value)
 
 
 def read_app_memory(elapsed_time: float, row: dict):
+    value = row.get("test.memory.vcat")
+    if value is None:
+        raise ValueError("Missing 'test.memory.vcat'")
 
-    return MemoryEntry(elapsed_time=elapsed_time, used_kb=0)
+    return MemoryEntry(elapsed_time=elapsed_time, used_kb=value)
 
 
 def _read_timestamp(row) -> int:

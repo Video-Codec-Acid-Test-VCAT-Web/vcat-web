@@ -618,7 +618,7 @@ function updateMemoryChart(telemetry, tabId) {
   const appMap = Object.fromEntries(app.map(a => [a.elapsed_time, a.app_kb]));
   const stepSize = computeStepSize(labels.at(-1) || 0);
   const systemData = system.map(p => p.used_kb / 1024);
-  const appData = system.map(p => (appMap[p.elapsed_time] ?? 0) / 1024);
+  const appData = app.map(p => p.used_kb / 1024);
 
   const datasets = [
     {
