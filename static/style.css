@@ -529,9 +529,24 @@ html, body {
   background: #222;
 }
 
-/* vcat-ai content pane: same look as .tab-pane, but a distinct class so
-   vcat-d's showTab() (which hides all .tab-pane) can't collapse it. */
-.ai-pane {
+/* vcat-ai tab strip + panes (Device + opened log-file chart tabs). Distinct
+   classes from vcat-d's .tab-button/.tab-pane so vcat-d's showTab() can't touch them. */
+.ai-tab-btn {
+  padding: 8px 16px;
+  background: #333;
+  color: white;
+  border: 1px solid #888;
+  border-radius: 6px 6px 0 0;
+  cursor: pointer;
+}
+
+.ai-tab-btn.active {
+  background: #555;
+  font-weight: bold;
+  border-bottom: none;
+}
+
+.ai-tab-pane {
   background: #1e1e1e;
   padding: 12px;
   border: 1px solid #888;

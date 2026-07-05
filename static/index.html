@@ -112,9 +112,10 @@
         <div id="app-panel-vcat_ai" class="app-panel" style="display: none;">
           <div style="margin: 0 20px;">
             <div id="ai-tab-header" style="display: flex; gap: 6px;">
-              <button class="tab-button active-tab">Device</button>
+              <button id="ai-device-tab-btn" class="ai-tab-btn active" onclick="showAiTab('ai-device')">Device</button>
             </div>
-            <div class="ai-pane">
+            <div id="ai-tab-content">
+            <div id="ai-device-tab" class="ai-tab-pane">
               <div class="ai-detail-row">
                 <div class="ai-detail-col">
                   <h3>Device Details</h3>
@@ -159,6 +160,8 @@
                 </div>
               </div>
             </div>
+            </div>
+            <!--ai-tab-content-->
           </div>
         </div>
         </div>

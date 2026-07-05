@@ -253,6 +253,8 @@ function handleConnectClick(source) {
           updateFreqChart(telemetry, `${tabId}`, tabId);
           updateMemoryChart(telemetry, `${tabId}`, tabId);
           updateFrameDropChart(telemetry, `${tabId}`, tabId);
+          injectTempChart(tabId);
+          updateTempChart(telemetry, tabId);
         })
         .catch(err => {
           console.error("❌ Failed to load telemetry from file:", err);
@@ -1222,12 +1224,236 @@ async function loadAiTestResults(deviceId) {
       `/api/device/test_results_files?session=${session_token}&device=${deviceId}&path=${encodeURIComponent(path)}`
     );
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    renderTestResultRows(body, await res.json());
+    renderTestResultRows(body, await res.json(), openAiLogFile);
   } catch (err) {
     console.error("Failed to load vcat-ai test results:", err);
     body.innerHTML =
       "<tr><td colspan='3' style='color: red;'>Failed to load test results</td></tr>";
   }
+}
+
+// --- vcat-ai telemetry tabs (Device + opened log-file chart views) ---
+
+function showAiTab(tabId) {
+  document.querySelectorAll("#ai-tab-content .ai-tab-pane")
+    .forEach(p => (p.style.display = "none"));
+  const pane = document.getElementById(`${tabId}-tab`);
+  if (pane) pane.style.display = "block";
+
+  document.querySelectorAll("#ai-tab-header .ai-tab-btn")
+    .forEach(b => b.classList.remove("active"));
+  const btn = document.getElementById(`${tabId}-tab-btn`);
+  if (btn) btn.classList.add("active");
+
+  sizeScrollAreas();
+}
+
+// Clone the telemetry chart template minus the frame-drop chart (vcat-ai has none).
+function setupAiTelemetryCanvas(tabId) {
+  const template = document.getElementById("telemetry-tab-template");
+  const clone = document.importNode(template.content, true);
+
+  const fd = clone.querySelector('canvas[data-id="frameDropChart"]');
+  if (fd && fd.closest(".chart-wrapper")) fd.closest(".chart-wrapper").remove();
+
+  // Add the vcat-ai-only "AI Processing Time" + "Temperature" charts.
+  const grid = clone.querySelector(".dashboard-grid");
+  if (grid) {
+    grid.appendChild(makeChartWrapper("aiProcChart", "AI Processing Time (ms)"));
+    grid.appendChild(makeChartWrapper("tempChart", "Temperature"));
+  }
+
+  clone.querySelectorAll("canvas[data-id]").forEach(canvas => {
+    canvas.id = `${tabId}-${canvas.getAttribute("data-id")}`;
+  });
+
+  document.getElementById(`${tabId}-tab`).appendChild(clone);
+}
+
+// Build a chart-wrapper containing a canvas with the given data-id (prefixed
+// per-tab later by the caller's data-id loop).
+function makeChartWrapper(dataId, title) {
+  const wrapper = document.createElement("div");
+  wrapper.className = "chart-wrapper";
+  const h3 = document.createElement("h3");
+  h3.textContent = title;
+  const canvas = document.createElement("canvas");
+  canvas.setAttribute("data-id", dataId);
+  wrapper.append(h3, canvas);
+  return wrapper;
+}
+
+// Add a Temperature chart canvas to an already-rendered tab pane (vcat-d file view).
+function injectTempChart(tabId) {
+  const pane = document.getElementById(`${tabId}-tab`);
+  if (!pane || document.getElementById(`${tabId}-tempChart`)) return;
+  const grid = pane.querySelector(".dashboard-grid");
+  if (!grid) return;
+  const wrapper = makeChartWrapper("tempChart", "Temperature");
+  wrapper.querySelector("canvas").id = `${tabId}-tempChart`;
+  wrapper.querySelector("canvas").removeAttribute("data-id");
+  grid.appendChild(wrapper);
+}
+
+// Temperature chart: battery temp (°C) + system thermal status (0-5), where the
+// system status is normalized so 0 -> 0 and 5 -> top of the graph.
+function updateTempChart(telemetry, tabId) {
+  const batt = telemetry.battery_temp || [];
+  const sys = telemetry.system_thermal || [];
+  if (!batt.length && !sys.length) return;
+
+  const labels = (batt.length ? batt : sys).map(p => p.elapsed_time);
+  const battData = batt.map(p => p.temp);
+
+  const battMax = battData.length ? Math.max(...battData) : 0;
+  const yMax = battMax > 0 ? Math.ceil(battMax) : 5; // system 5 hits the top
+  const sysData = sys.map(p => (p.status / 5) * yMax);
+
+  const canvasId = `${tabId}-tempChart`;
+  const canvas = document.getElementById(canvasId);
+  if (!canvas) {
+    console.warn(`⚠️ Temp chart canvas not found: ${canvasId}`);
+    return;
+  }
+
+  const datasets = [];
+  if (battData.length) {
+    datasets.push({
+      label: "Battery Temp (°C)", data: battData,
+      borderColor: COLORS[0], backgroundColor: COLORS[0],
+      borderWidth: 2, tension: 0.1, pointRadius: 0,
+    });
+  }
+  if (sysData.length) {
+    datasets.push({
+      label: "System Thermal (0–5, norm)", data: sysData,
+      borderColor: COLORS[1], backgroundColor: COLORS[1],
+      borderWidth: 2, tension: 0.1, pointRadius: 0,
+    });
+  }
+
+  const latestTime = labels.at(-1) || 0;
+  const stepSize = computeStepSize(latestTime);
+
+  chartsByTabId[tabId] ||= {};
+  let ref = chartsByTabId[tabId].tempChart;
+  if (!ref) {
+    const opts = chartOptions("Temperature (°C)", latestTime, stepSize);
+    opts.scales.y = { ...opts.scales.y, beginAtZero: true, min: 0, max: yMax };
+    ref = new Chart(canvas.getContext("2d"), {
+      type: "line", data: { labels, datasets }, options: opts,
+    });
+  } else {
+    ref.data.labels = labels;
+    ref.data.datasets = datasets;
+    ref.options.scales.x.max = latestTime + 60;
+    ref.options.scales.x.ticks.stepSize = stepSize;
+    ref.options.scales.y.max = yMax;
+    ref.update();
+  }
+  chartsByTabId[tabId].tempChart = ref;
+}
+
+// AI Processing Time chart: frame-proc / inference / inference-cpu, ns -> ms.
+function updateAiProcChart(telemetry, tabId) {
+  const series = [
+    { key: "frameProcTime", label: "Frame Proc" },
+    { key: "infTimeNs", label: "Inference" },
+    { key: "infCpuTimeNs", label: "Inference CPU" },
+  ];
+
+  const base = telemetry[series[0].key] || [];
+  if (!base.length) return;
+
+  const labels = base.map(p => p.elapsed_time);
+  const stepSize = computeStepSize(labels.at(-1) || 0);
+
+  const datasets = series.map((s, i) => ({
+    label: s.label,
+    data: (telemetry[s.key] || []).map(p => p.value_ns / 1e6),
+    borderColor: COLORS[i % COLORS.length],
+    backgroundColor: COLORS[i % COLORS.length],
+    borderWidth: 2,
+    tension: 0.1,
+    pointRadius: 0,
+  }));
+
+  const canvasId = `${tabId}-aiProcChart`;
+  if (!document.getElementById(canvasId)) {
+    console.warn(`⚠️ AI proc chart canvas not found: ${canvasId}`);
+    return;
+  }
+
+  chartsByTabId[tabId] ||= {};
+  chartsByTabId[tabId].aiProcChart = updateChart(
+    chartsByTabId[tabId].aiProcChart,
+    canvasId,
+    datasets,
+    labels,
+    "AI Processing Time (ms)",
+    labels.at(-1),
+    stepSize
+  );
+}
+
+// Open a vcat-ai log file into its own chart tab (CPU / Freq / Memory / Battery).
+function openAiLogFile(filePath) {
+  const deviceId = document.getElementById("device")?.value;
+  const fileName = filePath.split("/").pop();
+  const tabId = "ai-" + fileName.replace(/[^a-zA-Z0-9_-]/g, "-");
+
+  if (!document.getElementById(`${tabId}-tab-btn`)) {
+    const header = document.getElementById("ai-tab-header");
+    const btn = document.createElement("button");
+    btn.id = `${tabId}-tab-btn`;
+    btn.className = "ai-tab-btn";
+    btn.onclick = () => showAiTab(tabId);
+
+    const label = document.createElement("span");
+    label.textContent = fileName;
+    btn.appendChild(label);
+
+    const close = document.createElement("span");
+    close.textContent = " ✖";
+    close.style.marginLeft = "8px";
+    close.style.cursor = "pointer";
+    close.style.color = "#ccc";
+    close.onclick = (e) => { e.stopPropagation(); closeAiTab(tabId); };
+    btn.appendChild(close);
+    header.appendChild(btn);
+
+    const pane = document.createElement("div");
+    pane.id = `${tabId}-tab`;
+    pane.className = "ai-tab-pane";
+    pane.style.display = "none";
+    document.getElementById("ai-tab-content").appendChild(pane);
+    setupAiTelemetryCanvas(tabId);
+  }
+
+  showAiTab(tabId);
+
+  const url = `/api/vcat_monitor/telemetry_from_file?session=${session_token}` +
+    `&device=${deviceId}&app=vcat_ai&telemetry_file_path=${encodeURIComponent(filePath)}`;
+  fetch(url)
+    .then(res => res.json())
+    .then(data => {
+      const telemetry = data.telemetry_data;
+      if (data.test_details) updateTestDetailsUI({ test_details: data.test_details }, tabId);
+      updateCpuChart(telemetry, tabId);
+      updateBatteryChart(telemetry, tabId);
+      updateFreqChart(telemetry, tabId);
+      updateMemoryChart(telemetry, tabId);
+      updateAiProcChart(telemetry, tabId);
+      updateTempChart(telemetry, tabId);
+    })
+    .catch(err => console.error("Failed to load vcat-ai telemetry:", err));
+}
+
+function closeAiTab(tabId) {
+  document.getElementById(`${tabId}-tab-btn`)?.remove();
+  document.getElementById(`${tabId}-tab`)?.remove();
+  if (chartsByTabId[tabId]) delete chartsByTabId[tabId];
+  showAiTab("ai-device");
 }
 
 // ARM CPU part id (decimal) -> core name; mirrors the server-side CPU_PART_MAP.
@@ -1568,7 +1794,7 @@ function fmtFileSize(b) {
 
 // Render Test Results rows (Name / Date / Size) into a <tbody>, shared by
 // vcat-d and vcat-ai. Row click opens the Open/Download context menu.
-function renderTestResultRows(body, files) {
+function renderTestResultRows(body, files, opener) {
   if (!body) return;
   body.innerHTML = "";
   files.forEach(file => {
@@ -1584,13 +1810,14 @@ function renderTestResultRows(body, files) {
     sizeTd.textContent = fmtFileSize(file.size);
 
     tr.append(nameTd, dateTd, sizeTd);
-    tr.onclick = (event) => openTestResultMenu(event, file.path);
+    tr.onclick = (event) => openTestResultMenu(event, file.path, opener);
     body.appendChild(tr);
   });
 }
 
 // Context menu (Open / Download as CSV|Excel) for a test-result row.
-function openTestResultMenu(event, filePath) {
+// `opener(filePath)` handles "Open" (vcat-d live-file view or vcat-ai chart tab).
+function openTestResultMenu(event, filePath, opener) {
   const existingMenu = document.getElementById("context-menu");
   if (existingMenu) existingMenu.remove();
 
@@ -1624,7 +1851,7 @@ function openTestResultMenu(event, filePath) {
 
   // Open
   menu.appendChild(createMenuItem("Open", () => {
-    handleConnectClick(filePath);
+    (opener || handleConnectClick)(filePath);
   }));
 
   // Download as submenu container

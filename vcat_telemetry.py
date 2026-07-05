@@ -811,7 +811,7 @@ def resetTelemetry(session_id, device_id):
 
     now = time.time()
 
-    telemetry_data = TelemetryData(
+    telemetry_data = VcatdTelemetryData(
         version=0,
         owner_session_id=session_id,
         device_id=device_id,
@@ -1623,7 +1623,60 @@ from dataclasses import asdict
 from datetime import datetime
 
 
+def build_ai_telemetry_response(telemetry, device_id: str) -> dict:
+    """Response for vcat-ai telemetry (VcataiTelemetryData): common series
+    (no frame drops) plus the AI processing-time series."""
+
+    def proc_series(entries):
+        return [
+            {"elapsed_time": e.elapsed_time, "value_ns": e.value_ns} for e in entries
+        ]
+
+    return {
+        "timestamp": datetime.now().isoformat(),
+        "device_id": device_id,
+        "test_details": asdict(telemetry.test_details),
+        "telemetry_data": {
+            "battery": [
+                {"elapsed_time": e.elapsed_time, "level": e.level}
+                for e in telemetry.battery_data
+            ],
+            "system_memory": [
+                {"elapsed_time": e.elapsed_time, "used_kb": e.used_kb}
+                for e in telemetry.system_memory
+            ],
+            "app_memory": [
+                {"elapsed_time": e.elapsed_time, "used_kb": e.used_kb}
+                for e in telemetry.app_memory
+            ],
+            "cpu_usage": [
+                {"elapsed_time": e.elapsed_time, **e.usage_pct}
+                for e in telemetry.cpu_usage
+            ],
+            "cpu_freq": [
+                {"elapsed_time": e.elapsed_time, "frequencies": e.frequencies}
+                for e in telemetry.cpu_freq
+            ],
+            "battery_temp": [
+                {"elapsed_time": e.elapsed_time, "temp": e.battery_temp}
+                for e in telemetry.battery_data
+            ],
+            "system_thermal": [
+                {"elapsed_time": e.elapsed_time, "status": e.status}
+                for e in telemetry.system_thermal_status
+            ],
+            "frameProcTime": proc_series(telemetry.frameProcTime),
+            "infTimeNs": proc_series(telemetry.infTimeNs),
+            "infCpuTimeNs": proc_series(telemetry.infCpuTimeNs),
+        },
+    }
+
+
 def build_telemetry_response(telemetry, device_id: str) -> dict:
+    # Live telemetry may leave system_thermal_status as a non-list; normalize.
+    sts = telemetry.system_thermal_status
+    if not isinstance(sts, list):
+        sts = []
     return {
         "timestamp": datetime.now().isoformat(),
         "device_id": device_id,
@@ -1632,6 +1685,14 @@ def build_telemetry_response(telemetry, device_id: str) -> dict:
             "battery": [
                 {"elapsed_time": entry.elapsed_time, "level": entry.level}
                 for entry in telemetry.battery_data
+            ],
+            "battery_temp": [
+                {"elapsed_time": entry.elapsed_time, "temp": entry.battery_temp}
+                for entry in telemetry.battery_data
+            ],
+            "system_thermal": [
+                {"elapsed_time": e.elapsed_time, "status": e.status}
+                for e in sts
             ],
             "system_memory": [
                 {
@@ -1740,9 +1801,12 @@ def api_telemetry_from_file(session_id, device_id):
             force_temp=True,  # ignore caller's destination
         )
 
-        telemetry = read_telemetry_data(session_id, local_path)
-
-        response = build_telemetry_response(telemetry, device_id)
+        if request.args.get("app") == "vcat_ai":
+            telemetry = read_ai_telemetry_data(session_id, local_path)
+            response = build_ai_telemetry_response(telemetry, device_id)
+        else:
+            telemetry = read_telemetry_data(session_id, local_path)
+            response = build_telemetry_response(telemetry, device_id)
 
         return Response(
             json.dumps(response, indent=2, sort_keys=False), mimetype="application/json"

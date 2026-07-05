@@ -1,9 +1,12 @@
 # Diff Summary
 
-Changes vs. the committed repo. Two themes: (A) **multi-app support** — vcat_web now
+Changes vs. the original repo baseline. Themes: (A) **multi-app support** — vcat_web now
 supports both **vcat-d** (`com.roncatech.vcat`) and **vcat-ai** (`com.roncatech.vcat_ai`)
-via a far-left app-tab UI, and no longer relies on a fixed on-device data folder; and
-(B) **extended telemetry** (GPU/NPU/thermal/frame-stats) collection and export.
+via a far-left app-tab UI, and no longer relies on a fixed on-device data folder;
+(B) **extended live telemetry** (GPU/NPU/thermal/frame-stats) collection and export; and
+(C) **vcat-ai log-file telemetry viewing** — open a vcat-ai log into its own chart tab,
+with vcat-ai-specific data model, AI processing-time series, and a temperature graph on
+both apps. (A and B are committed in `4fa2a5b`; C is the current change.)
 
 ---
 
@@ -97,6 +100,44 @@ via a far-left app-tab UI, and no longer relies on a fixed on-device data folder
 
 ---
 
+## C. vcat-ai log-file telemetry viewing
+
+### Data model (`vcat_telemetry_data_models.py`)
+- `TelemetryData` renamed to **`VcatdTelemetryData`** (annotations updated across the
+  reader and `vcat_telemetry_writer.py`).
+- New **`ProcTimeNs`** entry (`elapsed_time`, `value_ns`) — `FramedropEntry`-style.
+- New **`VcataiTelemetryData`** type: common series (battery, cpu freq/usage, memory) +
+  `system_thermal_status` + AI series `frameProcTime` / `infTimeNs` / `infCpuTimeNs`
+  (each `list[ProcTimeNs]`); no frame-drops. Factory `make_empty_ai_telemetry_data()`.
+- `TestConditions.from_dict()` made tolerant of a missing/empty `test_conditions` block
+  (vcat-ai logs omit it; was `KeyError: 'runLimit'`).
+
+### Reader (`vcat_telemetry_reader.py`)
+- `read_ai_telemetry_data()` — separate loader reusing the shared low-level field parsers
+  but expecting vcat-ai columns; parses `transform.frame_proc_time_ns`,
+  `transform.inference_time_ns`, `transform.inference_cpu_time` (missing → 0, row-aligned).
+- `_read_system_thermal()` parses `system.thermal_status` (0–5); both loaders now populate
+  `system_thermal_status`.
+
+### Server (`vcat_telemetry.py`)
+- `build_ai_telemetry_response()` — vcat-ai response (common series + AI proc-time series);
+  `build_telemetry_response()` extended with `battery_temp` + `system_thermal` (guards a
+  non-list `system_thermal_status` from the live path).
+- `/api/vcat_monitor/telemetry_from_file?app=vcat_ai` dispatches to the AI reader/builder.
+
+### Frontend (`static/*`)
+- vcat-ai panel is now a real tab area (`#ai-tab-header` / `#ai-tab-content`): a **Device**
+  tab plus dynamically-opened **log-file chart tabs** (closable), own `.ai-tab-btn` /
+  `.ai-tab-pane` classes.
+- `openAiLogFile()` opens a log into a chart tab (CPU / Freq / Memory / Battery) built from
+  the shared template **minus the frame-drop chart**; wired to the Test Results "Open" via
+  a new `opener` param on the shared `renderTestResultRows` / `openTestResultMenu`.
+- **AI Processing Time (ms)** chart (`updateAiProcChart`) plots the three proc-time series
+  (ns → ms).
+- **Temperature** chart (`updateTempChart`) on both apps' log-file views: battery temp (°C)
+  + system thermal (0–5) normalized so 0→0 and 5→top of graph. Added via `makeChartWrapper`
+  (vcat-ai) / `injectTempChart` (vcat-d file view), leaving the vcat-d live tab untouched.
+
 ## ⚠️ Notes before pushing
 
 - **Debug timing values** are currently in place and should likely be reverted:
@@ -110,5 +151,7 @@ via a far-left app-tab UI, and no longer relies on a fixed on-device data folder
   `get_app_memory`, and the ADB broadcast still hard-code `com.roncatech.vcat`; only
   gfxinfo uses the `VCAT_PACKAGE` config. Route these through the active app profile when
   vcat-ai monitoring is built out.
-- **vcat-ai Test Results "Open"** reuses vcat-d's `handleConnectClick`, which drives the
-  vcat-d file-telemetry view (downloads work regardless).
+- **Temperature graph is on the log-file views only** — the vcat-d **live** worker does not
+  yet collect battery temp or system thermal, so the live tab has no temperature chart.
+- **`transform.inference_cpu_time`** older logs stored tiny values (non-ns); newer logs use
+  ns. Missing/unparseable values render as 0.

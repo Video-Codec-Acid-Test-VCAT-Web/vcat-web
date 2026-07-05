@@ -39,7 +39,7 @@ import os
 import re
 from datetime import datetime
 from io import StringIO
-__all__ = ["read_telemetry_data"]
+__all__ = ["read_telemetry_data", "read_ai_telemetry_data"]
 import json
 from typing import List, Optional
 import vcat_logging
@@ -173,6 +173,28 @@ def read_app_memory(elapsed_time: float, row: dict):
     return MemoryEntry(elapsed_time=elapsed_time, used_kb=value)
 
 
+def _read_proc_time_ns(elapsed_time: float, row: dict, key: str) -> ProcTimeNs:
+    # Missing/unparseable value -> 0 (keeps the series aligned per-row).
+    value = row.get(key)
+    if value is None or value == "":
+        return ProcTimeNs(elapsed_time=elapsed_time, value_ns=0)
+    try:
+        return ProcTimeNs(elapsed_time=elapsed_time, value_ns=parse_int(value))
+    except (ValueError, TypeError):
+        return ProcTimeNs(elapsed_time=elapsed_time, value_ns=0)
+
+
+def _read_system_thermal(elapsed_time: float, row: dict) -> SystemThermalStatus:
+    # Android thermal status (0-5). Missing/unparseable -> 0.
+    value = row.get("system.thermal_status")
+    if value is None or value == "":
+        return SystemThermalStatus(elapsed_time=elapsed_time, status=0)
+    try:
+        return SystemThermalStatus(elapsed_time=elapsed_time, status=parse_int(value))
+    except (ValueError, TypeError):
+        return SystemThermalStatus(elapsed_time=elapsed_time, status=0)
+
+
 def _read_timestamp(row) -> int:
     return int(
         float(row["test.timestamp"])
@@ -189,7 +211,7 @@ def identify_blob_type(blob: dict) -> Optional[str]:
         return "test_conditions"
     return None
 
-def read_telemetry_data(session_id, telemetry_file) -> TelemetryData:
+def read_telemetry_data(session_id, telemetry_file) -> VcatdTelemetryData:
 
     # code here
 
@@ -199,6 +221,7 @@ def read_telemetry_data(session_id, telemetry_file) -> TelemetryData:
     frame_drops: list[FramedropEntry] = []
     cpu_freq: List[CpuFreguencyEntry] = []
     cpu_usage: List[CpuUsageEntry] = []
+    system_thermal: List[SystemThermalStatus] = []
 
     rows, header_version, device_info, session_info, test_conditions = _read_telemetry_dicts(telemetry_file)
 
@@ -217,6 +240,7 @@ def read_telemetry_data(session_id, telemetry_file) -> TelemetryData:
         frame_drops.append(_read_frame_drops(elapsed_time, row))
         system_memory.append(_read_system_memory(elapsed_time, row))
         app_memory.append(read_app_memory(elapsed_time, row))
+        system_thermal.append(_read_system_thermal(elapsed_time, row))
 
     test_start_time = datetime.fromtimestamp(start_time / 1000.0).isoformat()
 
@@ -259,6 +283,92 @@ def read_telemetry_data(session_id, telemetry_file) -> TelemetryData:
     telemetry.cpu_freq = cpu_freq
     telemetry.cpu_usage = cpu_usage
     telemetry.frame_drops = frame_drops
+    telemetry.system_thermal_status = system_thermal
+    telemetry.test_conditions = test_conditions
+    telemetry.test_details = test_details
+
+    return telemetry
+
+
+def read_ai_telemetry_data(session_id, telemetry_file) -> VcataiTelemetryData:
+    """
+    Reads a vcat-ai telemetry CSV. Shares the common fields with vcat-d
+    (battery, cpu freq/usage, memory) but has NO frame-drop column, uses
+    different video/test-detail fields, and adds AI processing-time series
+    (frame_proc / inference / inference_cpu), so it is parsed separately.
+    """
+    battery_data: list[BatteryEntry] = []
+    system_memory: list[MemoryEntry] = []
+    app_memory: list[MemoryEntry] = []
+    cpu_freq: List[CpuFreguencyEntry] = []
+    cpu_usage: List[CpuUsageEntry] = []
+    frame_proc_time: List[ProcTimeNs] = []
+    inf_time_ns: List[ProcTimeNs] = []
+    inf_cpu_time_ns: List[ProcTimeNs] = []
+    system_thermal: List[SystemThermalStatus] = []
+
+    rows, header_version, device_info, session_info, test_conditions = _read_telemetry_dicts(telemetry_file)
+
+    if header_version < 2:
+        raise ValueError("Missing or unsupported header version")
+
+    start_time = _read_timestamp(rows[0])
+
+    for row in rows:
+        cur_time = _read_timestamp(row)
+        elapsed_time = (cur_time - start_time) / 1000.0
+        battery_data.append(_read_battery_row(elapsed_time, row))
+        cpu_freq.append(_read_cpu_freqs(elapsed_time, row))
+        cpu_usage.append(_read_cpu_usages(elapsed_time, row))
+        system_memory.append(_read_system_memory(elapsed_time, row))
+        app_memory.append(read_app_memory(elapsed_time, row))
+        system_thermal.append(_read_system_thermal(elapsed_time, row))
+        # NOTE: vcat-ai has no frame-drop data — intentionally not read.
+
+        frame_proc_time.append(_read_proc_time_ns(elapsed_time, row, "transform.frame_proc_time_ns"))
+        inf_time_ns.append(_read_proc_time_ns(elapsed_time, row, "transform.inference_time_ns"))
+        inf_cpu_time_ns.append(_read_proc_time_ns(elapsed_time, row, "transform.inference_cpu_time"))
+
+    test_start_time = datetime.fromtimestamp(start_time / 1000.0).isoformat()
+
+    filename = rows[0].get("test.filename", "")
+    resolution = rows[0].get(
+        "video.input.resolution", rows[0].get("video.render.resolution", "")
+    )
+
+    current_video = CurrentTestVideo(
+        fileName=os.path.basename(filename),
+        startTime=test_start_time,
+        videoCodec="",
+        videoDecoder="",
+        resolution=resolution,
+        mimeType="",
+        bitrate="",
+        framerate=0.0,
+    )
+
+    test_details = TestDetails(
+        testState="Completed",
+        startTime=test_start_time,
+        playlist=session_info.playlist,
+        currentTestVideo=current_video,
+    )
+
+    telemetry = make_empty_ai_telemetry_data()
+    telemetry.version = header_version
+    telemetry.owner_session_id = session_id
+    telemetry.device_info = device_info
+    telemetry.session_info = session_info
+    telemetry.start_time = start_time
+    telemetry.battery_data = battery_data
+    telemetry.system_memory = system_memory
+    telemetry.app_memory = app_memory
+    telemetry.cpu_freq = cpu_freq
+    telemetry.cpu_usage = cpu_usage
+    telemetry.system_thermal_status = system_thermal
+    telemetry.frameProcTime = frame_proc_time
+    telemetry.infTimeNs = inf_time_ns
+    telemetry.infCpuTimeNs = inf_cpu_time_ns
     telemetry.test_conditions = test_conditions
     telemetry.test_details = test_details
 

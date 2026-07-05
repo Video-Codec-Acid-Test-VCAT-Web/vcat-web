@@ -57,13 +57,16 @@ __all__ = [
     "MemoryEntry",
     "MemoryInfo",
     "parse_device_info",
+    "ProcTimeNs",
     "SessionInfo",
-    "TelemetryData",
+    "VcatdTelemetryData",
+    "VcataiTelemetryData",
     "ThermalStatus",
     "TestConditions",
     "TestDetails",
     "SystemThermalStatus",
-    "make_empty_telemetry_data"
+    "make_empty_telemetry_data",
+    "make_empty_ai_telemetry_data"
 ]
 
 from dataclasses import dataclass
@@ -118,13 +121,16 @@ class TestConditions:
 
     @staticmethod
     def from_dict(d: Dict) -> "TestConditions":
+        # vcat-ai logs (and some vcat-d logs) have no test_conditions block.
+        if not d:
+            return TestConditions.empty()
         decoder_dict = d.get("decoderCfg", {}).get("decoderConfig", {})
         return TestConditions(
             decoderConfig=DecoderConfig.from_dict(decoder_dict),
-            runLimit=d["runLimit"],
-            runMode=d["runMode"],
-            screenBrightness=d["screenBrightness"],
-            threads=d["threads"]
+            runLimit=d.get("runLimit", 0),
+            runMode=d.get("runMode", ""),
+            screenBrightness=d.get("screenBrightness", 0),
+            threads=d.get("threads", 0)
         )
 
     def to_dict(self) -> Dict:
@@ -251,6 +257,13 @@ class BatteryEntry:
 class FramedropEntry:
     elapsed_time: float = 0.0
     delta_framedrops: int = 0
+
+
+@dataclass
+class ProcTimeNs:
+    """A timed processing/inference measurement in nanoseconds (vcat-ai)."""
+    elapsed_time: float = 0.0
+    value_ns: int = 0
 
 
 @dataclass
@@ -386,7 +399,7 @@ class SessionInfo:
 
 
 @dataclass
-class TelemetryData:
+class VcatdTelemetryData:
     version: int
     owner_session_id: str
     device_id: str
@@ -409,11 +422,11 @@ class TelemetryData:
     gpu_frame_stats: List[GpuFrameStatsEntry] = field(default_factory=list)
     thermal_status: List[ThermalStatus] = field(default_factory=list)
 
-def make_empty_telemetry_data() -> TelemetryData:
-    obj = object.__new__(TelemetryData)
+def make_empty_telemetry_data() -> VcatdTelemetryData:
+    obj = object.__new__(VcatdTelemetryData)
 
     # Explicitly cast to avoid Pyright confusion
-    obj = cast(TelemetryData, obj)
+    obj = cast(VcatdTelemetryData, obj)
 
     obj.version = -1
     obj.owner_session_id = ""
@@ -436,6 +449,56 @@ def make_empty_telemetry_data() -> TelemetryData:
     obj.npu_usage = []
     obj.gpu_frame_stats = []
     obj.thermal_status = []
+
+    return obj
+
+
+@dataclass
+class VcataiTelemetryData:
+    version: int
+    owner_session_id: str
+    device_id: str
+    device_ipaddr: str
+    device_info: DeviceInfo
+    session_info: SessionInfo
+    start_time: float
+    start_battery: BatteryEntry
+    test_conditions: TestConditions
+    test_details: TestDetails
+    battery_data: list[BatteryEntry]
+    system_memory: list[MemoryEntry]
+    app_memory: list[MemoryEntry]
+    cpu_freq: List[CpuFreguencyEntry]
+    cpu_usage: List[CpuUsageEntry] = field(default_factory=list)
+    system_thermal_status: List[SystemThermalStatus] = field(default_factory=list)
+    infTimeNs: List[ProcTimeNs] = field(default_factory=list)
+    infCpuTimeNs: List[ProcTimeNs] = field(default_factory=list)
+    frameProcTime: List[ProcTimeNs] = field(default_factory=list)
+
+
+def make_empty_ai_telemetry_data() -> VcataiTelemetryData:
+    obj = object.__new__(VcataiTelemetryData)
+    obj = cast(VcataiTelemetryData, obj)
+
+    obj.version = -1
+    obj.owner_session_id = ""
+    obj.device_id = ""
+    obj.device_ipaddr = ""
+    obj.device_info = DeviceInfo()
+    obj.session_info = SessionInfo()
+    obj.start_time = 0.0
+    obj.start_battery = BatteryEntry()
+    obj.test_conditions = TestConditions.empty()
+    obj.test_details = TestDetails()
+    obj.battery_data = []
+    obj.system_memory = []
+    obj.app_memory = []
+    obj.cpu_freq = []
+    obj.cpu_usage = []
+    obj.system_thermal_status = []
+    obj.infTimeNs = []
+    obj.infCpuTimeNs = []
+    obj.frameProcTime = []
 
     return obj
 

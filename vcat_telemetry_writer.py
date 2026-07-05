@@ -91,7 +91,7 @@ def format_device_filename(device_id: str, manufacturer: str, model: str) -> str
 
 
 def export_telemetry(
-    session_id, device_id, telemetry_data: TelemetryData, output_path: str
+    session_id, device_id, telemetry_data: VcatdTelemetryData, output_path: str
 ) -> str:
 
     create_telemetry_excel_at_path(telemetry_data, output_path)
@@ -219,7 +219,7 @@ def export_telemetry(
     return output_path
 
 
-def create_telemetry_excel(telemetry_data: TelemetryData) -> str:
+def create_telemetry_excel(telemetry_data: VcatdTelemetryData) -> str:
     base_filename = format_device_filename(
         telemetry_data.device_id,
         telemetry_data.device_info.manufacturer,
@@ -234,7 +234,7 @@ def create_telemetry_excel(telemetry_data: TelemetryData) -> str:
 
 
 def create_telemetry_excel_at_path(
-    telemetry_data: TelemetryData, file_path_name: str
+    telemetry_data: VcatdTelemetryData, file_path_name: str
 ) -> str:
 
     wb = Workbook()
