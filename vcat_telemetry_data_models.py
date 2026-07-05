@@ -52,12 +52,14 @@ __all__ = [
     "DeviceInfo",
     "DisplayResolution",
     "FramedropEntry",
+    "GpuFrameStatsEntry",
     "LRUCache",
     "MemoryEntry",
     "MemoryInfo",
     "parse_device_info",
     "SessionInfo",
     "TelemetryData",
+    "ThermalStatus",
     "TestConditions",
     "TestDetails",
     "SystemThermalStatus",
@@ -272,6 +274,29 @@ class CpuFreguencyEntry:
     frequencies: Dict[str, int] = field(default_factory=dict)
 
 @dataclass
+class ThermalStatus:
+    elapsed_time: float = 0.0
+    cpu: Optional[float] = None
+    gpu: Optional[float] = None
+    npu: Optional[float] = None
+    skin: Optional[float] = None
+    soc: Optional[float] = None
+
+
+@dataclass
+class GpuFrameStatsEntry:
+    elapsed_time: float = 0.0
+    new_frames: int = 0
+    avg_gpu_ms: float = 0.0
+    max_gpu_ms: float = 0.0
+    janky_frames: int = 0
+    p50_ms: float = 0.0
+    p90_ms: float = 0.0
+    p95_ms: float = 0.0
+    p99_ms: float = 0.0
+
+
+@dataclass
 class SystemThermalStatus:
     elapsed_time: float = 0.0
     status: int = 0
@@ -379,6 +404,10 @@ class TelemetryData:
     frame_drops: list[FramedropEntry]
     cpu_freq: List[CpuFreguencyEntry]
     cpu_usage: List[CpuUsageEntry] = field(default_factory=list)
+    gpu_usage: List[CpuUsageEntry] = field(default_factory=list)
+    npu_usage: List[CpuUsageEntry] = field(default_factory=list)
+    gpu_frame_stats: List[GpuFrameStatsEntry] = field(default_factory=list)
+    thermal_status: List[ThermalStatus] = field(default_factory=list)
 
 def make_empty_telemetry_data() -> TelemetryData:
     obj = object.__new__(TelemetryData)
@@ -403,6 +432,10 @@ def make_empty_telemetry_data() -> TelemetryData:
     obj.frame_drops = []
     obj.cpu_freq = []
     obj.cpu_usage = []
+    obj.gpu_usage = []
+    obj.npu_usage = []
+    obj.gpu_frame_stats = []
+    obj.thermal_status = []
 
     return obj
 

@@ -76,6 +76,8 @@ MAX_CONSOLE_LINES = 500
 
 BROADCAST_COMMANDS = {
     "log_http_port": "com.roncatech.vcat.ADB_LOG_HTTP_INFO",
+    "log_http_port_ai": "com.roncatech.vcat_ai.ADB_LOG_HTTP_INFO",
+    "log_root": "com.roncatech.vcat.ACTION_LOG_ROOT",
 }
 
 
@@ -238,48 +240,127 @@ def get_device_ip(session_id: str, device_id: str) -> Optional[str]:
     return None
     
 
-def get_device_ip_and_port(session_id, device_id):
-    
-    if device_id in ipCache:
-        return ipCache[device_id]
+def _resolve_http_server(session_id, device_id, broadcast_key, cache_key):
+    """
+    Asks a VCAT app to log its HTTP server address via broadcast, then scrapes
+    logcat for the "HTTP server @ <ip>:<port>" line and returns "http://ip:port".
 
-    send_adb_broadcast(session_id, device_id, "log_http_port")
+    Not filtered by logcat tag: vcat-d and vcat-ai log under different tags. We
+    take the most recent match, which corresponds to the broadcast just sent.
+    """
+    if cache_key in ipCache:
+        return ipCache[cache_key]
 
     try:
-        # Grab logcat for just the VCAT tag
-        logcat_cmd = ["adb", "-s", device_id, "logcat", "-d", "-s", "VCAT"]
-        result = subprocess.run(logcat_cmd, capture_output=True, text=True, check=True)
-        log_output = result.stdout
+        # Clear logcat first so only this app's fresh response is present (both
+        # vcat-d and vcat-ai log an "HTTP server @ ip:port" line), then broadcast.
+        subprocess.run(["adb", "-s", device_id, "logcat", "-c"], capture_output=True)
+        send_adb_broadcast(session_id, device_id, broadcast_key)
 
-        # Clear logcat to avoid stale data next time
-        # subprocess.run(["adb", "-s", device_id, "logcat", "-c"])
+        # The app logs its address asynchronously after handling the broadcast, so
+        # poll logcat until the line appears.
+        for _ in range(6):
+            result = subprocess.run(
+                ["adb", "-s", device_id, "logcat", "-d"],
+                capture_output=True, text=True, check=True,
+            )
+            matches = re.findall(
+                r"HTTP server @ ((?:\d{1,3}\.){3}\d{1,3}):(\d+)", result.stdout
+            )
+            if matches:
+                ip_address, port = matches[-1]
+                addr = f"http://{ip_address}:{port}"
+                log_console_entry(session_id, f"[VCAT] {device_id} ip_addr: {addr}")
+                print(f"[VCAT] {device_id} ip_addr: {addr}")
+                ipCache[cache_key] = addr
+                return addr
+            time.sleep(0.5)
 
-        # Parse logcat output
-        match = re.search(r"HTTP server @ ((?:\d{1,3}\.){3}\d{1,3}):(\d+)", log_output)
-        if match:
-            ip_address, port = match.group(1), int(match.group(2))
-            log_console_entry(
-                session_id, f"[VCAT] {device_id} ip_addr: http://{ip_address}:{port}"
-            )
-            log_console_entry(
-                session_id, f"[VCAT] {device_id} ip_addr: http://{ip_address}:{port}"
-            )
-            print(f"[VCAT] {device_id} ip_addr: http://{ip_address}:{port}")
-            ipCache[device_id] = f"http://{ip_address}:{port}"
-            return f"http://{ip_address}:{port}"
-
-        else:
-            logger.error("[VCAT] ERROR: Could not find HTTP server line in logcat")
-            log_console_entry(
-                session_id, "[VCAT] ERROR: Could not find HTTP server line in logcat"
-            )
-            return None
+        logger.error("[VCAT] ERROR: Could not find HTTP server line in logcat")
+        log_console_entry(
+            session_id, "[VCAT] ERROR: Could not find HTTP server line in logcat"
+        )
+        return None
 
     except Exception as e:
         msg = f"[VCAT] Exception during IP/port retrieval: {str(e)}"
         logger.error(msg)
         log_console_entry(session_id, msg)
         return None
+
+
+def get_device_ip_and_port(session_id, device_id):
+    """Resolve the vcat-d app's HTTP server address."""
+    return _resolve_http_server(session_id, device_id, "log_http_port", device_id)
+
+
+def get_ai_device_ip_and_port(session_id, device_id):
+    """Resolve the vcat-ai app's HTTP server address (separate cache key/port)."""
+    return _resolve_http_server(
+        session_id, device_id, "log_http_port_ai", f"{device_id}:ai"
+    )
+
+
+rootFolderCache: OrderedDict[str, str] = OrderedDict()
+
+
+def get_device_root_folder(session_id: str, device_id: str) -> Optional[str]:
+    """
+    Discovers the on-device VCAT data folder (which the user selects/creates and
+    can be named anything) by asking the app to log it.
+
+    Sends the ACTION_LOG_ROOT broadcast; the app responds by logging a line under
+    the "CommandReceiver" tag:
+        root_folder=/sdcard/vcat-d (uri=content://.../tree/primary%3Avcat-d)
+    We scrape that line from logcat and return the path portion.
+    """
+    if device_id in rootFolderCache:
+        return rootFolderCache[device_id]
+
+    send_adb_broadcast(session_id, device_id, "log_root")
+
+    try:
+        # NOTE: the app logs this under the "CommandReceiver" tag, NOT "VCAT".
+        logcat_cmd = ["adb", "-s", device_id, "logcat", "-d", "-s", "CommandReceiver"]
+        result = subprocess.run(logcat_cmd, capture_output=True, text=True, check=True)
+        log_output = result.stdout
+
+        # Take the last match in case stale entries are present in the buffer.
+        matches = re.findall(r"root_folder=(.+?)\s+\(uri=", log_output)
+        if matches:
+            root_folder = matches[-1].strip()
+            log_console_entry(
+                session_id, f"[VCAT] {device_id} root_folder: {root_folder}"
+            )
+            print(f"[VCAT] {device_id} root_folder: {root_folder}")
+            rootFolderCache[device_id] = root_folder
+            return root_folder
+
+        logger.error("[VCAT] ERROR: Could not find root_folder line in logcat")
+        log_console_entry(
+            session_id, "[VCAT] ERROR: Could not find root_folder line in logcat"
+        )
+        return None
+
+    except Exception as e:
+        msg = f"[VCAT] Exception during root folder retrieval: {str(e)}"
+        logger.error(msg)
+        log_console_entry(session_id, msg)
+        return None
+
+
+def list_installed_packages(session_id: str, device_id: str) -> set:
+    """Returns the set of package names installed on the device (via `pm list packages`)."""
+    cmd = ["adb", "-s", device_id, "shell", "pm", "list", "packages"]
+    output = run_adb_command_with_log(
+        session_id=session_id, device_id=device_id, cmd=cmd, log_level="debug"
+    )
+    packages = set()
+    for line in (output or "").splitlines():
+        line = line.strip()
+        if line.startswith("package:"):
+            packages.add(line[len("package:"):])
+    return packages
 
 
 def get_battery_level(device_id):

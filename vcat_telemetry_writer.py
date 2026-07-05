@@ -67,8 +67,12 @@ class TelemetrySheet(str, Enum):
     BATTERY = "Battery"
     CPU_USAGE = "CPU Usage"
     CPU_FREQ = "CPU Frequency"
+    GPU_USAGE = "GPU Usage"
+    NPU_USAGE = "NPU Usage"
     FRAME_DROPS = "Frame Drops"
     MEMORY = "Memory"
+    GPU_FRAME_STATS = "GPU Frame Stats"
+    THERMAL_STATUS = "Thermal Status"
 
 
 # Maintain open workbooks in memory per device
@@ -149,6 +153,20 @@ def export_telemetry(
 
         append_telemetry(telemetry_data.owner_session_id, TelemetrySheet.CPU_FREQ, rows)
 
+    if telemetry_data.gpu_usage:
+        rows = [
+            [entry.elapsed_time, entry.usage_pct.get("gpu", 0.0)]
+            for entry in telemetry_data.gpu_usage
+        ]
+        append_telemetry(telemetry_data.owner_session_id, TelemetrySheet.GPU_USAGE, rows)
+
+    if telemetry_data.npu_usage:
+        rows = [
+            [entry.elapsed_time, entry.usage_pct.get("npu", 0.0)]
+            for entry in telemetry_data.npu_usage
+        ]
+        append_telemetry(telemetry_data.owner_session_id, TelemetrySheet.NPU_USAGE, rows)
+
     if telemetry_data.frame_drops:
         append_telemetry(
             telemetry_data.owner_session_id,
@@ -156,6 +174,43 @@ def export_telemetry(
             [
                 [entry.elapsed_time, entry.delta_framedrops]
                 for entry in telemetry_data.frame_drops
+            ],
+        )
+
+    if telemetry_data.gpu_frame_stats:
+        append_telemetry(
+            telemetry_data.owner_session_id,
+            TelemetrySheet.GPU_FRAME_STATS,
+            [
+                [
+                    entry.elapsed_time,
+                    entry.new_frames,
+                    entry.avg_gpu_ms,
+                    entry.max_gpu_ms,
+                    entry.janky_frames,
+                    entry.p50_ms,
+                    entry.p90_ms,
+                    entry.p95_ms,
+                    entry.p99_ms,
+                ]
+                for entry in telemetry_data.gpu_frame_stats
+            ],
+        )
+
+    if telemetry_data.thermal_status:
+        append_telemetry(
+            telemetry_data.owner_session_id,
+            TelemetrySheet.THERMAL_STATUS,
+            [
+                [
+                    entry.elapsed_time,
+                    entry.cpu,
+                    entry.gpu,
+                    entry.npu,
+                    entry.skin,
+                    entry.soc,
+                ]
+                for entry in telemetry_data.thermal_status
             ],
         )
 
@@ -221,8 +276,12 @@ def create_telemetry_excel_at_path(
         TelemetrySheet.BATTERY.value,
         TelemetrySheet.CPU_USAGE.value,
         TelemetrySheet.CPU_FREQ.value,
+        TelemetrySheet.GPU_USAGE.value,
+        TelemetrySheet.NPU_USAGE.value,
         TelemetrySheet.FRAME_DROPS.value,
         TelemetrySheet.MEMORY.value,
+        TelemetrySheet.GPU_FRAME_STATS.value,
+        TelemetrySheet.THERMAL_STATUS.value,
     ]:
         wb.create_sheet(sheet_name)
 
@@ -239,11 +298,19 @@ def create_telemetry_excel_at_path(
         ["Elapsed Time (s)", "total"] + ccore_labels
     )
     wb[TelemetrySheet.CPU_FREQ.value].append(["Elapsed Time (s)"] + ccore_labels)
+    wb[TelemetrySheet.GPU_USAGE.value].append(["Elapsed Time (s)", "gpu (%)"])
+    wb[TelemetrySheet.NPU_USAGE.value].append(["Elapsed Time (s)", "npu (%)"])
     wb[TelemetrySheet.FRAME_DROPS.value].append(
         ["Elapsed Time (s)", "Delta Frame Drops"]
     )
     wb[TelemetrySheet.MEMORY.value].append(
         ["Elapsed Time (s)", "Total KB", "Used KB", "App KB"]
+    )
+    wb[TelemetrySheet.GPU_FRAME_STATS.value].append(
+        ["Elapsed Time (s)", "New Frames", "Avg GPU ms", "Max GPU ms", "Janky Frames", "p50 ms", "p90 ms", "p95 ms", "p99 ms"]
+    )
+    wb[TelemetrySheet.THERMAL_STATUS.value].append(
+        ["Elapsed Time (s)", "CPU °C", "GPU °C", "NPU °C", "Skin °C", "SoC °C"]
     )
 
     wb.save(file_path_name)

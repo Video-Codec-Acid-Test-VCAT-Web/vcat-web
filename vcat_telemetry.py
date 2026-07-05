@@ -91,6 +91,26 @@ max_console_lines = get_config_option(ConfigKey.MAX_CONSOLE_LINES)
 
 app = Flask(__name__, static_folder="static")
 
+# Dev/monitoring tool: never let the browser cache HTML/JS/CSS, so UI changes
+# always take effect on reload (no manual hard-refresh needed).
+app.config["SEND_FILE_MAX_AGE_DEFAULT"] = 0
+
+
+@app.after_request
+def add_no_cache_headers(response):
+    response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+    response.headers["Pragma"] = "no-cache"
+    response.headers["Expires"] = "0"
+    return response
+
+
+# Known VCAT app builds. A device may have either, both, or neither installed;
+# the frontend renders one left-rail tab per installed app (order preserved).
+VCAT_APP_PROFILES = [
+    {"id": "vcat_d", "label": "VCAT-D", "package": "com.roncatech.vcat"},
+    {"id": "vcat_ai", "label": "VCAT-AI", "package": "com.roncatech.vcat_ai"},
+]
+
 
 @app.route("/")
 def serve_index():
@@ -148,6 +168,258 @@ def get_cpu_stats(device_id, elapsed_time, prev_raw_data: Dict[str, List[int]]):
 
     except Exception as e:
         logger.error(f"[get_cpu_stats ERROR] {e}")
+        return None
+
+
+# Ordered list of sysfs paths to try for GPU busy percentage, by vendor
+_GPU_SYSFS_PATHS = [
+    "/sys/class/kgsl/kgsl-3d0/gpu_busy_percentage",    # Adreno (Qualcomm)
+    "/sys/class/misc/mali0/device/utilization",          # Mali (ARM / Samsung)
+    "/sys/bus/platform/drivers/mali/mali0/utilization",  # Mali (alternative)
+    "/sys/kernel/ged/hal/gpu_utilization",               # MediaTek GED HAL
+    "/sys/kernel/ged/hal/loading",                       # MediaTek GED loading
+    "/proc/mtk_mali/gpu_utilization",                    # MediaTek Mali proc
+]
+
+
+def get_gpu_stats(device_id: str, elapsed_time: float) -> Optional[CpuUsageEntry]:
+    try:
+        cat_cmds = " || ".join(f"cat {p} 2>/dev/null" for p in _GPU_SYSFS_PATHS)
+        result = subprocess.run(
+            ["adb", "-s", device_id, "shell", cat_cmds],
+            capture_output=True,
+            text=True,
+        )
+
+        output = result.stdout.strip()
+        if not output:
+            return None
+
+        match = re.search(r"(\d+(?:\.\d+)?)", output)
+        if not match:
+            return None
+
+        pct = float(match.group(1))
+        return CpuUsageEntry(
+            elapsed_time=elapsed_time,
+            usage_pct={"gpu": pct},
+            raw_stats={},
+        )
+
+    except Exception as e:
+        logger.error(f"[get_gpu_stats ERROR] {e}")
+        return None
+
+
+# NPU sysfs probe paths, grouped by vendor (Qualcomm then MediaTek).
+# Google Tensor NPU does not expose utilization via sysfs and is not probed.
+_NPU_SYSFS_PATHS = [
+    # Qualcomm — msm_npu driver (Snapdragon devices with dedicated NPU block)
+    "/sys/class/npu/msm_npu/stats",
+    "/sys/bus/platform/drivers/msm_npu/stats",
+    # MediaTek — MDLA (ML Dedicated Learning Accelerator) core
+    "/sys/class/misc/mdla0/device/utilization",
+    # MediaTek — APUSYS subsystem (Dimensity / MT8xxx series)
+    "/sys/devices/platform/soc/10006000.apusys/utilization",
+    "/sys/devices/platform/soc/19000000.apusys/utilization",
+]
+
+
+def get_npu_stats(device_id: str, elapsed_time: float) -> Optional[CpuUsageEntry]:
+    try:
+        cat_cmds = " || ".join(f"cat {p} 2>/dev/null" for p in _NPU_SYSFS_PATHS)
+        result = subprocess.run(
+            ["adb", "-s", device_id, "shell", cat_cmds],
+            capture_output=True,
+            text=True,
+        )
+
+        output = result.stdout.strip()
+        if not output:
+            return None
+
+        match = re.search(r"(\d+(?:\.\d+)?)", output)
+        if not match:
+            return None
+
+        pct = float(match.group(1))
+        return CpuUsageEntry(
+            elapsed_time=elapsed_time,
+            usage_pct={"npu": pct},
+            raw_stats={},
+        )
+
+    except Exception as e:
+        logger.error(f"[get_npu_stats ERROR] {e}")
+        return None
+
+
+# Per-device cursor tracking for dumpsys gfxinfo frame stats
+_last_vsync_id: Dict[str, int] = {}
+
+
+def get_gpu_frame_stats(device_id: str, elapsed_time: float) -> Optional[GpuFrameStatsEntry]:
+    try:
+        package = get_config_option(ConfigKey.VCAT_PACKAGE)
+        result = subprocess.run(
+            ["adb", "-s", device_id, "shell", f"dumpsys gfxinfo {package} framestats"],
+            capture_output=True,
+            text=True,
+        )
+        output = result.stdout
+
+        # Parse PROFILEDATA section — CSV rows after the header line.
+        # Column indices are parsed from the header row (varies by Android version/OEM).
+        profile_section = False
+        col_vsync_id = col_swap = col_gpu = col_deadline = None
+        frames: List[Dict[str, int]] = []
+
+        for line in output.splitlines():
+            stripped = line.strip()
+            if stripped == "---PROFILEDATA---":
+                if profile_section:
+                    break  # second marker = end of section
+                profile_section = True
+                col_vsync_id = col_swap = col_gpu = col_deadline = None
+                continue
+            if not profile_section:
+                continue
+
+            # First line after marker is the header
+            if col_vsync_id is None:
+                headers = [h.strip() for h in stripped.split(",")]
+                try:
+                    col_vsync_id = headers.index("FrameTimelineVsyncId")
+                    col_swap = headers.index("SwapBuffers")
+                    col_gpu = headers.index("GpuCompleted")
+                    col_deadline = headers.index("FrameDeadline")
+                except ValueError:
+                    break  # missing required columns, skip this section
+                continue
+
+            cols = stripped.split(",")
+            if len(cols) <= max(col_vsync_id, col_swap, col_gpu, col_deadline):
+                continue
+            try:
+                vsync_id = int(cols[col_vsync_id])
+                swap_ns = int(cols[col_swap])
+                gpu_ns = int(cols[col_gpu])
+                deadline_ns = int(cols[col_deadline])
+            except (ValueError, IndexError):
+                continue
+
+            # Skip invalid/zero rows and negative GPU times (gpu finished before swap = invalid)
+            if swap_ns <= 0 or gpu_ns <= 0 or gpu_ns <= swap_ns:
+                continue
+
+            frames.append({
+                "vsync_id": vsync_id,
+                "gpu_ms": (gpu_ns - swap_ns) / 1_000_000.0,
+                "deadline_ns": deadline_ns,
+                "gpu_ns": gpu_ns,
+            })
+
+        if not frames:
+            return None
+
+        # Only process frames newer than the last seen vsync_id.
+        max_vsync = max(f["vsync_id"] for f in frames)
+        last_seen = _last_vsync_id.get(device_id, -1)
+        new_frames = [f for f in frames if f["vsync_id"] > last_seen]
+
+        if not new_frames:
+            return None
+
+        _last_vsync_id[device_id] = max_vsync
+
+        gpu_times = [f["gpu_ms"] for f in new_frames]
+        gpu_times_sorted = sorted(gpu_times)
+        n = len(gpu_times_sorted)
+
+        def percentile(sorted_list, pct):
+            idx = max(0, int(pct / 100.0 * n) - 1)
+            return sorted_list[idx]
+
+        # Janky = frame completed after its deadline
+        janky = sum(1 for f in new_frames if f["gpu_ns"] > f["deadline_ns"])
+
+        # Parse percentiles from summary section (p50/p90/p95/p99)
+        p50 = p90 = p95 = p99 = 0.0
+        for line in output.splitlines():
+            m = re.match(r"\s*(\d+)th gpu percentile:\s*(\d+)ms", line, re.IGNORECASE)
+            if m:
+                pval = int(m.group(1))
+                ms = float(m.group(2))
+                if pval == 50:
+                    p50 = ms
+                elif pval == 90:
+                    p90 = ms
+                elif pval == 95:
+                    p95 = ms
+                elif pval == 99:
+                    p99 = ms
+
+        # Fall back to computed percentiles if summary section had none
+        if p50 == 0.0 and n > 0:
+            p50 = percentile(gpu_times_sorted, 50)
+            p90 = percentile(gpu_times_sorted, 90)
+            p95 = percentile(gpu_times_sorted, 95)
+            p99 = percentile(gpu_times_sorted, 99)
+
+        return GpuFrameStatsEntry(
+            elapsed_time=elapsed_time,
+            new_frames=n,
+            avg_gpu_ms=round(sum(gpu_times) / n, 2),
+            max_gpu_ms=round(max(gpu_times), 2),
+            janky_frames=janky,
+            p50_ms=round(p50, 2),
+            p90_ms=round(p90, 2),
+            p95_ms=round(p95, 2),
+            p99_ms=round(p99, 2),
+        )
+
+    except Exception as e:
+        logger.error(f"[get_gpu_frame_stats ERROR] {e}")
+        return None
+
+
+def get_thermal_status(device_id: str, elapsed_time: float) -> Optional[ThermalStatus]:
+    try:
+        result = subprocess.run(
+            ["adb", "-s", device_id, "shell", "dumpsys thermalservice"],
+            capture_output=True,
+            text=True,
+        )
+
+        temps: Dict[str, float] = {}
+        in_current = False
+
+        for line in result.stdout.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("Current temperatures from HAL"):
+                in_current = True
+                continue
+            if in_current:
+                if stripped.startswith("Current cooling") or stripped == "":
+                    break
+                m = re.match(r"Temperature\{mValue=([\d.]+),\s*mType=\d+,\s*mName=(\w+),", stripped)
+                if m:
+                    temps[m.group(2).lower()] = float(m.group(1))
+
+        if not temps:
+            return None
+
+        return ThermalStatus(
+            elapsed_time=elapsed_time,
+            cpu=temps.get("cpu"),
+            gpu=temps.get("gpu"),
+            npu=temps.get("npu"),
+            skin=temps.get("skin"),
+            soc=temps.get("soc"),
+        )
+
+    except Exception as e:
+        logger.error(f"[get_thermal_status ERROR] {e}")
         return None
 
 
@@ -210,30 +482,35 @@ def get_test_details(session_id, device_id: str) -> TestDetails:
 
     # Call the telemetry endpoint
     ip_addr = telemetry.device_ipaddr
+
+    if not ip_addr or not ip_addr.strip():
+        return TestDetails()
+
     response: Response = vcat_http_proxy.get_device_http_response(
         session_id, device_id, ip_addr, "/api/test/status"
     )
 
     if not response or response.status_code != 200:
-        logger.error(f"Failed to fetch test status for {device_id}")
+        logger.warning(f"Failed to fetch test status for {device_id}")
         return TestDetails()
 
     try:
-        data = response.get_json()
+        data = response.get_json() or {}
+        video = data.get("currentTestVideo") or {}
 
         return TestDetails(
             playlist=data.get("playlist", ""),
             startTime=data.get("startTime", ""),
             testState=data.get("testState", "Unknown"),
             currentTestVideo=CurrentTestVideo(
-                fileName=data["currentTestVideo"].get("fileName", ""),
-                startTime=data["currentTestVideo"].get("startTime", ""),
-                videoCodec=data["currentTestVideo"].get("videoCodec", ""),
-                videoDecoder=data["currentTestVideo"].get("videoDecoder", ""),
-                resolution=data["currentTestVideo"].get("resolution", ""),
-                mimeType=data["currentTestVideo"].get("mimeType", ""),
-                bitrate=data["currentTestVideo"].get("bitrate", ""),
-                framerate=data["currentTestVideo"].get("fps", 0.0),
+                fileName=video.get("fileName", ""),
+                startTime=video.get("startTime", ""),
+                videoCodec=video.get("videoCodec", ""),
+                videoDecoder=video.get("videoDecoder", ""),
+                resolution=video.get("resolution", ""),
+                mimeType=video.get("mimeType", ""),
+                bitrate=video.get("bitrate", ""),
+                framerate=video.get("fps", 0.0),
             ),
         )
     except Exception as e:
@@ -347,6 +624,10 @@ def telemetry_worker():
                 prev_raw_data = {}
 
             cur_cpu_usage = get_cpu_stats(device_id, elapsed, prev_raw_data)
+            cur_gpu_usage = get_gpu_stats(device_id, elapsed)
+            cur_npu_usage = get_npu_stats(device_id, elapsed)
+            cur_gpu_frame_stats = get_gpu_frame_stats(device_id, elapsed)
+            cur_thermal = get_thermal_status(device_id, elapsed)
 
             cpu_freqs = vcat_adb.get_cpu_frequencies(device_id)
 
@@ -455,6 +736,55 @@ def telemetry_worker():
                         [freq_row],
                     )
 
+                if cur_gpu_usage is not None:
+                    telemetry_data.gpu_usage.append(cur_gpu_usage)
+                    append_telemetry(
+                        telemetry_data.owner_session_id,
+                        TelemetrySheet.GPU_USAGE,
+                        [[cur_gpu_usage.elapsed_time, cur_gpu_usage.usage_pct.get("gpu", 0.0)]],
+                    )
+
+                if cur_npu_usage is not None:
+                    telemetry_data.npu_usage.append(cur_npu_usage)
+                    append_telemetry(
+                        telemetry_data.owner_session_id,
+                        TelemetrySheet.NPU_USAGE,
+                        [[cur_npu_usage.elapsed_time, cur_npu_usage.usage_pct.get("npu", 0.0)]],
+                    )
+
+                if cur_gpu_frame_stats is not None:
+                    telemetry_data.gpu_frame_stats.append(cur_gpu_frame_stats)
+                    append_telemetry(
+                        telemetry_data.owner_session_id,
+                        TelemetrySheet.GPU_FRAME_STATS,
+                        [[
+                            cur_gpu_frame_stats.elapsed_time,
+                            cur_gpu_frame_stats.new_frames,
+                            cur_gpu_frame_stats.avg_gpu_ms,
+                            cur_gpu_frame_stats.max_gpu_ms,
+                            cur_gpu_frame_stats.janky_frames,
+                            cur_gpu_frame_stats.p50_ms,
+                            cur_gpu_frame_stats.p90_ms,
+                            cur_gpu_frame_stats.p95_ms,
+                            cur_gpu_frame_stats.p99_ms,
+                        ]],
+                    )
+
+                if cur_thermal is not None:
+                    telemetry_data.thermal_status.append(cur_thermal)
+                    append_telemetry(
+                        telemetry_data.owner_session_id,
+                        TelemetrySheet.THERMAL_STATUS,
+                        [[
+                            cur_thermal.elapsed_time,
+                            cur_thermal.cpu,
+                            cur_thermal.gpu,
+                            cur_thermal.npu,
+                            cur_thermal.skin,
+                            cur_thermal.soc,
+                        ]],
+                    )
+
         if stop_event.wait(
             timeout=get_config_option(ConfigKey.TELEMETRY_LOOP_POLL_INTERVAL)
         ):
@@ -473,7 +803,7 @@ def console_cleanup_loop():
             for sid in expired:
                 logger.debug(f"[Session Cleanup] Expiring session {sid}")
                 del vcat_adb.session_consoles[sid]
-        time.sleep(60)
+        time.sleep(2)
 
 
 def resetTelemetry(session_id, device_id):
@@ -498,8 +828,15 @@ def resetTelemetry(session_id, device_id):
         frame_drops=[],
         cpu_freq=[],
         cpu_usage=[],
+        gpu_usage=[],
+        npu_usage=[],
+        gpu_frame_stats=[],
+        thermal_status=[],
         session_info=SessionInfo()
     )
+
+    # Reset the vsync cursor for this device so we don't skip frames after reset
+    _last_vsync_id.pop(device_id, None)
 
     # ✅ Reset telemetry for the given device
     with session_thread_lock:
@@ -1152,6 +1489,62 @@ def get_files(session_id, device_id, path):
     return filenames
 
 
+@app.route("/api/device/ai_device_info", methods=["GET"])
+@require_valid_session_and_device
+def api_device_ai_device_info(session_id, device_id):
+    """
+    Resolves the vcat-ai app's HTTP server (via the vcat_ai broadcast + logcat)
+    and proxies GET /api/device_info, returning the app's device-info JSON.
+    """
+    ip_addr = vcat_adb.get_ai_device_ip_and_port(session_id, device_id)
+    if not ip_addr:
+        return jsonify({"error": "Could not resolve vcat-ai HTTP server"}), 404
+
+    response = vcat_http_proxy.get_device_http_response(
+        session_id, device_id, ip_addr, "/api/device_info"
+    )
+    if not response or response.status_code != 200:
+        return jsonify({"error": "Failed to fetch vcat-ai device info"}), 502
+
+    try:
+        data = json.loads(response.get_data(as_text=True))
+    except Exception as e:
+        logger.error(f"Invalid vcat-ai device_info JSON: {e}")
+        return jsonify({"error": "Invalid device info from vcat-ai"}), 502
+
+    data["ip_addr"] = ip_addr
+    return jsonify(data)
+
+
+@app.route("/api/device/vcat_apps", methods=["GET"])
+@require_valid_session_and_device
+def api_device_vcat_apps(session_id, device_id):
+    """
+    Returns the VCAT app builds installed on the device, in profile order.
+    The frontend renders one left-rail tab per entry.
+    """
+    installed = vcat_adb.list_installed_packages(session_id, device_id)
+    apps = [
+        {"id": p["id"], "label": p["label"], "package": p["package"]}
+        for p in VCAT_APP_PROFILES
+        if p["package"] in installed
+    ]
+    return jsonify(apps)
+
+
+@app.route("/api/device/root_folder", methods=["GET"])
+@require_valid_session_and_device
+def api_device_root_folder(session_id, device_id):
+    """
+    Resolves the on-device VCAT data folder (user-selected, no fixed name) by
+    asking the app to log it via broadcast. See vcat_adb.get_device_root_folder.
+    """
+    root = vcat_adb.get_device_root_folder(session_id, device_id)
+    if not root:
+        return jsonify({"error": "Could not resolve device root folder"}), 404
+    return jsonify({"root_folder": root})
+
+
 @app.route("/api/device/files", methods=["GET"])
 @require_valid_session_device_and_path
 def api_device_files(session_id, device_id, path):
@@ -1171,29 +1564,55 @@ def api_device_files(session_id, device_id, path):
 def api_device_test_results_files(session_id, device_id, path):
 
     try:
-        filenames = get_files(session_id, device_id, path)
-
-        sorted_files = sorted(filenames, reverse=True)
+        # `ls -l` so we get file sizes; toybox format is:
+        #   perms links owner group SIZE date time NAME
+        cmd = ["adb", "-s", device_id, "shell", f"ls -l {path}"]
+        output = vcat_adb.run_adb_command_with_log(
+            session_id=session_id, device_id=device_id, cmd=cmd, log_level="debug"
+        )
 
         file_entries = []
+        for line in (output or "").splitlines():
+            line = line.strip()
+            if not line or line.startswith("total"):
+                continue
 
-        for path in sorted_files:
-            # Example: extract '1747269593728' from the filename
-            match = re.search(r"logs_(\d+)_infinite\.csv", path)
+            parts = line.split()
+            if len(parts) < 8:
+                continue
+            try:
+                size = int(parts[4])
+            except ValueError:
+                continue
+            full_path = " ".join(parts[7:])
+            filename = full_path.rsplit("/", 1)[-1]
+
+            # Timestamp (ms) embedded in the filename — handles both vcat-d
+            # (logs_<ts>.csv) and vcat-ai (vcatai_log_<ts>.csv) naming.
+            match = re.search(r"(\d{10,})", filename)
             if match:
-                timestamp_ms = int(match.group(1))
-                dt = datetime.fromtimestamp(timestamp_ms / 1000.0)
-                display = dt.strftime("Test: %m/%d/%Y, %I:%M:%S %p")
+                dt = datetime.fromtimestamp(int(match.group(1)) / 1000.0)
+                date_display = dt.strftime("%m/%d/%Y, %I:%M:%S %p")
             else:
-                display = path  # fallback if pattern doesn't match
+                date_display = ""
 
-            file_entries.append({"path": path, "display_name": display})
+            file_entries.append(
+                {
+                    "path": full_path,
+                    "filename": filename,
+                    "date": date_display,
+                    "size": size,
+                }
+            )
+
+        # Newest first (filename embeds the timestamp)
+        file_entries.sort(key=lambda e: e["filename"], reverse=True)
 
         return jsonify(file_entries)
 
     except Exception as e:
-        app.logger.error(f"[{device_id}] Failed to list playlists in {path}: {e}")
-        return jsonify({"error": "Failed to list playlist files"}), 500
+        app.logger.error(f"[{device_id}] Failed to list test results in {path}: {e}")
+        return jsonify({"error": "Failed to list test result files"}), 500
 
 
 ##########################################
@@ -1242,12 +1661,51 @@ def build_telemetry_response(telemetry, device_id: str) -> dict:
                 }
                 for entry in telemetry.cpu_freq
             ],
+            "gpu_usage": [
+                {
+                    "elapsed_time": entry.elapsed_time,
+                    **entry.usage_pct,
+                }
+                for entry in telemetry.gpu_usage
+            ],
+            "npu_usage": [
+                {
+                    "elapsed_time": entry.elapsed_time,
+                    **entry.usage_pct,
+                }
+                for entry in telemetry.npu_usage
+            ],
             "frame_drops": [
                 {
                     "elapsed_time": entry.elapsed_time,
                     "delta_framedrops": entry.delta_framedrops,
                 }
                 for entry in telemetry.frame_drops
+            ],
+            "gpu_frame_stats": [
+                {
+                    "elapsed_time": entry.elapsed_time,
+                    "new_frames": entry.new_frames,
+                    "avg_gpu_ms": entry.avg_gpu_ms,
+                    "max_gpu_ms": entry.max_gpu_ms,
+                    "janky_frames": entry.janky_frames,
+                    "p50_ms": entry.p50_ms,
+                    "p90_ms": entry.p90_ms,
+                    "p95_ms": entry.p95_ms,
+                    "p99_ms": entry.p99_ms,
+                }
+                for entry in telemetry.gpu_frame_stats
+            ],
+            "thermal_status": [
+                {
+                    "elapsed_time": entry.elapsed_time,
+                    "cpu": entry.cpu,
+                    "gpu": entry.gpu,
+                    "npu": entry.npu,
+                    "skin": entry.skin,
+                    "soc": entry.soc,
+                }
+                for entry in telemetry.thermal_status
             ],
         },
     }
@@ -1414,10 +1872,10 @@ def api_start_device_monitor(session_id, device_id):
     ip_addr = ""
 
     # Step 1: Find device IP address
-    try:
-        ip_addr = get_required_ip_and_port(session_id, device_id)
-    except ValueError as e:
-        return jsonify({"error": str(e)}), 404
+#    try:
+#        ip_addr = get_required_ip_and_port(session_id, device_id)
+#    except ValueError as e:
+#        return jsonify({"error": str(e)}), 404
 
     device_info, error_response = get_device_info(session_id, device_id)
     if error_response:

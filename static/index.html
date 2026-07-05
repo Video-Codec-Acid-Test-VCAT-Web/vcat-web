@@ -17,7 +17,7 @@
                 <legend style="padding: 0 6px; font-weight: bold; color: white; text-align: left;">Device</legend>
                 <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 10px; padding-left: 8px;"> <select id="device" style="min-width: 200px;">
                         <option disabled selected>Loading devices...</option>
-                    </select> <img alt="Connect" id="connect-btn" onclick="handleConnectClick('Live')" src="/static/btn_connect_device.png" style="width: 40px; height: 40px; cursor: pointer;" title="Connect" /> </div>
+                    </select> </div>
             </fieldset>
         </div>
         <!--device wrapper -->
@@ -30,7 +30,11 @@
         <!--header -->
     </div>
     <!--main content -->
-    <<div id="main-tab-wrapper" style="
+    <div id="app-layout" style="display: flex; align-items: flex-start;">
+      <div id="app-rail"></div>
+      <div id="app-panels" style="flex: 1; min-width: 0;">
+      <div id="app-panel-vcat_d" class="app-panel">
+    <div id="main-tab-wrapper" style="
           padding-bottom: 60px;
           overflow: visible;
           min-height: 100%;
@@ -59,7 +63,7 @@
                   align-items: center;
                   margin-top: 10px;
                   margin-bottom: 10px;
-                "> <img alt="Run Config" id="run-config-btn" onclick="openRunConfigModal()" src="/static/btn_run_config.png" style="width: 36px; height: 36px; cursor: pointer;" title="Run Config" /> <img alt="Console" id="console-btn" onclick="openConsoleModal()" src="/static/btn_console.png" style="width: 36px; height: 36px; cursor: pointer;" title="Open Console" /> </div>
+                "> <img alt="Connect" id="connect-btn" onclick="handleConnectClick('Live')" src="/static/btn_connect_device.png" style="width: 36px; height: 36px; cursor: pointer;" title="Connect (Go Live)" /> <img alt="Run Config" id="run-config-btn" onclick="openRunConfigModal()" src="/static/btn_run_config.png" style="width: 36px; height: 36px; cursor: pointer;" title="Run Config" /> <img alt="Console" id="console-btn" onclick="openConsoleModal()" src="/static/btn_console.png" style="width: 36px; height: 36px; cursor: pointer;" title="Open Console" /> </div>
                     <h3>Device Details</h3>
                     <div style="display: flex; gap: 20px; align-items: flex-start;">
                         <div id="device-details" style="width: 400px; border: 1px solid #888; padding: 10px; border-radius: 6px;">
@@ -74,44 +78,27 @@
                         <div style="width: 300px;"></div>
                     </div>
                     <!--display-->
-                    <fieldset class="playlist-fieldset" style="
-                 width: 400px;
-                 margin-top: 12px;
-                 border: 1px solid #888;
-                 border-radius: 6px;
-                 background: #111;
-                 color: white;
-                 font-family: monospace;
-                 font-size: 13px;
-               ">
-                        <legend style="padding: 0 8px; font-weight: bold;">Playlists</legend>
-                        <div style="max-height: 180px; overflow-y: auto; padding: 10px;">
-                            <ul id="playlist-list" style="
-                     margin: 0;
-                     padding-left: 16px;
-                     list-style-type: disc;
-                   "></ul>
+                    <div id="device-subtabs" style="margin-top: 12px; width: 100%;">
+                        <div style="display: flex; gap: 6px;">
+                            <button id="playlists-subtab-btn" class="subtab-btn active" onclick="showDeviceSubTab('playlists')">Playlists</button>
+                            <button id="test-results-subtab-btn" class="subtab-btn" onclick="showDeviceSubTab('test-results')">Test Results</button>
                         </div>
-                    </fieldset>
-                    <fieldset class="test-results-fieldset" style="
-                 width: 400px;
-                 margin-top: 12px;
-                 border: 1px solid #888;
-                 border-radius: 6px;
-                 background: #111;
-                 color: white;
-                 font-family: monospace;
-                 font-size: 13px;
-               ">
-                        <legend style="padding: 0 8px; font-weight: bold;">Test Results</legend>
-                        <div style="max-height: 180px; overflow-y: auto; padding: 10px;">
-                            <ul id="test-results-list" style="
-                     margin: 0;
-                     padding-left: 16px;
-                     list-style-type: disc;
-                   "></ul>
+                        <div id="playlists-subtab" class="subtab-panel">
+                            <div class="list-scroll" style="overflow-y: auto; padding: 10px;">
+                                <ul id="playlist-list" style="margin: 0; padding-left: 16px; list-style-type: disc;"></ul>
+                            </div>
                         </div>
-                    </fieldset>
+                        <div id="test-results-subtab" class="subtab-panel" style="display: none;">
+                            <div class="list-scroll" style="overflow-y: auto;">
+                                <table id="test-results-table" class="file-table">
+                                    <thead>
+                                        <tr><th>Name</th><th>Date</th><th class="size-col">Size</th></tr>
+                                    </thead>
+                                    <tbody id="test-results-body"></tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </div>
                 </div>
                 <!--device-tab-->
             </div>
@@ -120,6 +107,64 @@
         <!--margin-->
         </div>
         <!--main-tab-wrapper-->
+        </div>
+        <!--app-panel-vcat_d-->
+        <div id="app-panel-vcat_ai" class="app-panel" style="display: none;">
+          <div style="margin: 0 20px;">
+            <div id="ai-tab-header" style="display: flex; gap: 6px;">
+              <button class="tab-button active-tab">Device</button>
+            </div>
+            <div class="ai-pane">
+              <div class="ai-detail-row">
+                <div class="ai-detail-col">
+                  <h3>Device Details</h3>
+                  <div id="ai-device-details" class="ai-detail-box">
+                    <div><strong>IP:</strong> <span id="ai-device-ip">—</span></div>
+                    <div><strong>Display:</strong> <span id="ai-device-display">—</span></div>
+                    <div><strong>SoC:</strong> <span id="ai-device-soc">—</span></div>
+                    <div><strong>CPU:</strong> <span id="ai-device-cpu">—</span></div>
+                    <div><strong>Storage:</strong> <span id="ai-device-storage">—</span></div>
+                    <div><strong>Memory:</strong> <span id="ai-device-memory">—</span></div>
+                  </div>
+                </div>
+                <div class="ai-detail-col">
+                  <h3>AI / Accelerators</h3>
+                  <div id="ai-accel-details" class="ai-detail-box">
+                    <div><strong>NNAPI Feature Level:</strong> <span id="ai-nnapi-level">—</span></div>
+                    <div><strong>NNAPI Devices:</strong> <span id="ai-nnapi-devices">—</span></div>
+                    <div><strong>QNN:</strong> <span id="ai-qnn">—</span></div>
+                  </div>
+                </div>
+              </div>
+
+              <div id="ai-subtabs" style="margin-top: 16px; width: 100%;">
+                <div style="display: flex; gap: 6px;">
+                  <button id="ai-tests-subtab-btn" class="subtab-btn active" onclick="showAiSubTab('tests')">Tests</button>
+                  <button id="ai-test-results-subtab-btn" class="subtab-btn" onclick="showAiSubTab('test-results')">Test Results</button>
+                </div>
+                <div id="ai-tests-subtab" class="subtab-panel">
+                  <div class="list-scroll" style="overflow-y: auto; padding: 10px;">
+                    <ul id="ai-tests-list" style="margin: 0; padding-left: 16px; list-style-type: disc;"></ul>
+                  </div>
+                </div>
+                <div id="ai-test-results-subtab" class="subtab-panel" style="display: none;">
+                  <div class="list-scroll" style="overflow-y: auto;">
+                    <table class="file-table">
+                      <thead>
+                        <tr><th>Name</th><th>Date</th><th class="size-col">Size</th></tr>
+                      </thead>
+                      <tbody id="ai-test-results-body"></tbody>
+                    </table>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+        </div>
+        <!--app-panels-->
+        </div>
+        <!--app-layout-->
         <div id="run-config-modal" class="modal-overlay">
             <div class="modal-content" id="run-config-modal-content"></div>
         </div>

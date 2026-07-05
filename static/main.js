@@ -1083,6 +1083,10 @@ function handleDeviceSelection() {
   if (selectedDeviceId && deviceSelect.options.length > 0) {
     updateDeviceTabLabel(selectedDeviceId);
 
+    // Detect installed VCAT apps and build the far-left app rail on selection
+    // (independent of going live).
+    setupAppTabs(selectedDeviceId);
+
     fetchDeviceInfo(selectedDeviceId).then(info => {
       if (info) {
         populateDeviceInfo(info);
@@ -1114,6 +1118,220 @@ function pingDevice() {
 
 // Main JS logic for VCAT tabbed interface
 
+// Far-left app rail: on connect, detect which VCAT builds are installed on the
+// device and render one tab per installed app. vcat-d hosts the full monitor UI;
+// vcat-ai is a placeholder for now. An app that isn't installed gets no tab.
+async function setupAppTabs(deviceId) {
+  const rail = document.getElementById("app-rail");
+  if (!rail) return;
+
+  let apps = [];
+  try {
+    const res = await fetch(
+      `/api/device/vcat_apps?session=${session_token}&device=${deviceId}`
+    );
+    if (res.ok) apps = await res.json();
+  } catch (err) {
+    console.error("Failed to detect VCAT apps:", err);
+  }
+
+  rail.innerHTML = "";
+  document.querySelectorAll(".app-panel").forEach(p => (p.style.display = "none"));
+
+  if (!apps.length) {
+    // No known VCAT app detected — fall back to the vcat-d panel.
+    const fallback = document.getElementById("app-panel-vcat_d");
+    if (fallback) fallback.style.display = "block";
+    return;
+  }
+
+  apps.forEach(app => {
+    const btn = document.createElement("button");
+    btn.className = "app-rail-btn";
+    btn.id = `app-rail-btn-${app.id}`;
+    btn.textContent = app.label;
+    btn.onclick = () => showAppTab(app.id);
+    rail.appendChild(btn);
+  });
+
+  showAppTab(apps[0].id);
+}
+
+function showAppTab(appId) {
+  document.querySelectorAll(".app-panel").forEach(p => (p.style.display = "none"));
+  const panel = document.getElementById(`app-panel-${appId}`);
+  if (panel) panel.style.display = "block";
+
+  document.querySelectorAll(".app-rail-btn").forEach(b => b.classList.remove("active"));
+  const activeBtn = document.getElementById(`app-rail-btn-${appId}`);
+  if (activeBtn) activeBtn.classList.add("active");
+
+  if (appId === "vcat_ai") {
+    const dev = document.getElementById("device")?.value;
+    loadAiDeviceInfo(dev);
+    loadAiTests(dev);
+    loadAiTestResults(dev);
+    showAiSubTab("tests");
+  }
+
+  sizeScrollAreas();
+}
+
+// vcat-ai has no root-folder broadcast yet, so its data folder is fixed for now.
+// (When vcat-ai adds ACTION_LOG_ROOT, swap this for a getDeviceRootFolder-style call.)
+const VCAT_AI_ROOT = "/sdcard/vcat-ai";
+
+function showAiSubTab(name) {
+  ["tests", "test-results"].forEach(key => {
+    const pane = document.getElementById(`ai-${key}-subtab`);
+    if (pane) pane.style.display = key === name ? "block" : "none";
+    const btn = document.getElementById(`ai-${key}-subtab-btn`);
+    if (btn) btn.classList.toggle("active", key === name);
+  });
+  sizeScrollAreas();
+}
+
+async function loadAiTests(deviceId) {
+  if (!deviceId) return;
+  const ul = document.getElementById("ai-tests-list");
+  const path = `${VCAT_AI_ROOT}/tests/*`;
+  try {
+    const res = await fetch(
+      `/api/device/files?session=${session_token}&device=${deviceId}&path=${encodeURIComponent(path)}`
+    );
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const files = await res.json();
+    ul.innerHTML = "";
+    files.forEach(name => {
+      const li = document.createElement("li");
+      li.textContent = name.split("/").pop();
+      ul.appendChild(li);
+    });
+  } catch (err) {
+    console.error("Failed to load vcat-ai tests:", err);
+    ul.innerHTML = "<li style='color: red;'>Failed to load tests</li>";
+  }
+}
+
+async function loadAiTestResults(deviceId) {
+  if (!deviceId) return;
+  const body = document.getElementById("ai-test-results-body");
+  const path = `${VCAT_AI_ROOT}/test_results/*.csv`;
+  try {
+    const res = await fetch(
+      `/api/device/test_results_files?session=${session_token}&device=${deviceId}&path=${encodeURIComponent(path)}`
+    );
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    renderTestResultRows(body, await res.json());
+  } catch (err) {
+    console.error("Failed to load vcat-ai test results:", err);
+    body.innerHTML =
+      "<tr><td colspan='3' style='color: red;'>Failed to load test results</td></tr>";
+  }
+}
+
+// ARM CPU part id (decimal) -> core name; mirrors the server-side CPU_PART_MAP.
+const AI_CPU_PART_MAP = {
+  0xd03: "Cortex-A53", 0xd04: "Cortex-A35", 0xd05: "Cortex-A55",
+  0xd07: "Cortex-A57", 0xd08: "Cortex-A72", 0xd09: "Cortex-A73",
+  0xd0a: "Cortex-A75", 0xd0b: "Cortex-A76", 0xd0c: "Neoverse-N1",
+  0xd40: "Cortex-A78", 0xd41: "Cortex-A78AE", 0xd44: "Cortex-X1",
+  0xd47: "Cortex-A710", 0xd48: "Cortex-X2", 0xd49: "Cortex-A510",
+  0xd4a: "Cortex-A715", 0xd4b: "Cortex-X3", 0xd4c: "Cortex-A520",
+  0xd4d: "Cortex-A720", 0xd4e: "Cortex-X4",
+};
+
+function fmtGB(bytes) {
+  return typeof bytes === "number" ? (bytes / 1e9).toFixed(1) + " GB" : "—";
+}
+
+// Populate the vcat-ai "Device Details" from the app's /api/device_info
+// (resolved via the vcat_ai broadcast + HTTP proxy on the server).
+async function loadAiDeviceInfo(deviceId) {
+  if (!deviceId) return;
+  const set = (id, val) => {
+    const el = document.getElementById(id);
+    if (el) el.textContent = val;
+  };
+
+  try {
+    const res = await fetch(
+      `/api/device/ai_device_info?session=${session_token}&device=${deviceId}`
+    );
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const info = await res.json();
+
+    set("ai-device-ip", extractIpBase(info.ip_addr));
+
+    const dr = info.displayResolution || {};
+    set("ai-device-display", dr.width && dr.height ? `${dr.width}×${dr.height}` : "—");
+
+    set("ai-device-soc", [info.socManufacturer, info.soc].filter(Boolean).join(" ") || "—");
+
+    const cpu = info.cpu || {};
+    const groups = {};
+    (cpu.cores || []).forEach(c => {
+      const name = AI_CPU_PART_MAP[c.cpu_part] || `Unknown(0x${(c.cpu_part || 0).toString(16)})`;
+      const label = `${(c.maxMHz / 1000).toFixed(1)} GHz ${name}`;
+      groups[label] = (groups[label] || 0) + 1;
+    });
+    const coreLines = Object.entries(groups).map(([l, n]) => `${n}×${l}`).join(", ");
+    set("ai-device-cpu", `${cpu.armArchitecture || "CPU"}: ${coreLines}`);
+
+    const st = info.storageInfo || {};
+    set("ai-device-storage", `${fmtGB(st.total)} / ${fmtGB(st.available)}`);
+
+    const mem = info.memoryInfo || {};
+    set("ai-device-memory", `${fmtGB(mem.total)} / ${fmtGB(mem.available)}`);
+
+    // AI-specific fields — only vcat-ai reports these.
+    const nnapi = info.nnapiInfo || {};
+    set("ai-nnapi-level", nnapi.runtimeFeatureLevel ?? info.nnapiFeatureLevel ?? "—");
+    const devices = (nnapi.devices || []).map(d => `${d.name} (${d.deviceType})`);
+    set("ai-nnapi-devices", devices.length ? devices.join(", ") : "—");
+
+    const qnn = info.qnnInfo;
+    if (qnn) {
+      set(
+        "ai-qnn",
+        `API ${qnn.apiVersion}, lib ${qnn.libraryLoaded ? "loaded" : "not loaded"}, ` +
+          `HTP fp16 ${qnn.htpFp16Available ? "yes" : "no"}, ` +
+          `HTP quant ${qnn.htpQuantizedAvailable ? "yes" : "no"}`
+      );
+    } else {
+      set("ai-qnn", "—");
+    }
+  } catch (err) {
+    console.error("Failed to load vcat-ai device info:", err);
+    set("ai-device-ip", "Unavailable");
+  }
+}
+
+// Size each visible list-scroll area so its bottom sits ~15px above the
+// viewport bottom; only the list scrolls internally (the page does not).
+function sizeScrollAreas() {
+  document.querySelectorAll(".list-scroll").forEach(el => {
+    if (el.offsetParent === null) return; // hidden — skip
+    const top = el.getBoundingClientRect().top;
+    const h = window.innerHeight - top - 15;
+    el.style.height = `${Math.max(h, 80)}px`;
+  });
+}
+
+window.addEventListener("resize", sizeScrollAreas);
+
+// Toggle the Playlists / Test Results sub-tabs in the vcat-d Device tab.
+function showDeviceSubTab(name) {
+  const tabs = { playlists: "playlists-subtab", "test-results": "test-results-subtab" };
+  Object.entries(tabs).forEach(([key, paneId]) => {
+    const pane = document.getElementById(paneId);
+    if (pane) pane.style.display = key === name ? "block" : "none";
+    const btn = document.getElementById(`${key}-subtab-btn`);
+    if (btn) btn.classList.toggle("active", key === name);
+  });
+  sizeScrollAreas();
+}
+
 function showTab(tabId) {
   const allTabs = document.querySelectorAll(".tab-pane");
   allTabs.forEach(tab => tab.style.display = "none");
@@ -1125,6 +1343,8 @@ function showTab(tabId) {
   document.querySelectorAll(".tab-button").forEach(btn => btn.classList.remove("active-tab"));
   const activeBtn = document.getElementById(`${tabId}-tab-btn`);
   if (activeBtn) activeBtn.classList.add("active-tab");
+
+  sizeScrollAreas();
 }
 
 
@@ -1244,12 +1464,42 @@ function populateDeviceDropdown() {
 window.addEventListener("DOMContentLoaded", populateDeviceDropdown);
 
 
-function loadPlaylistFiles() {
+// Cache of resolved on-device VCAT root folders, keyed by device id.
+// The folder is user-selected (no fixed name), so we ask the app via
+// /api/device/root_folder rather than assuming a path.
+const deviceRootFolderCache = {};
+
+async function getDeviceRootFolder(deviceId) {
+  if (deviceRootFolderCache[deviceId]) return deviceRootFolderCache[deviceId];
+
+  const url = `/api/device/root_folder?session=${session_token}&device=${deviceId}`;
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`Failed to resolve root folder (${res.status})`);
+
+  const data = await res.json();
+  const root = (data.root_folder || "").replace(/\/+$/, "");
+  if (!root) throw new Error("Empty root folder");
+
+  deviceRootFolderCache[deviceId] = root;
+  return root;
+}
+
+async function loadPlaylistFiles() {
   const deviceSelect = document.getElementById("device");
   const selectedDeviceId = deviceSelect?.value;
   if (!selectedDeviceId) return;
 
-    const path = "/sdcard/Vcat/*.xspf";
+  let root;
+  try {
+    root = await getDeviceRootFolder(selectedDeviceId);
+  } catch (err) {
+    console.error("Failed to resolve root folder:", err);
+    const ul = document.getElementById("playlist-list");
+    ul.innerHTML = "<li style='color: red;'>Failed to resolve device folder</li>";
+    return;
+  }
+
+    const path = `${root}/playlist/*.xspf`;
     const url = `/api/device/files?session=${session_token}&device=${selectedDeviceId}&path=${encodeURIComponent(path)}`;
 
   fetch(url)
@@ -1265,7 +1515,7 @@ function loadPlaylistFiles() {
 
       files.forEach(name => {
         const li = document.createElement("li");
-        li.textContent = name;
+        li.textContent = name.split("/").pop();
         ul.appendChild(li);
       });
     })
@@ -1276,117 +1526,150 @@ function loadPlaylistFiles() {
     });
 }
 
-function loadTestResults() {
+async function loadTestResults() {
   const deviceSelect = document.getElementById("device");
   const selectedDeviceId = deviceSelect?.value;
   if (!selectedDeviceId) return;
 
-  const path = "/sdcard/vcat/test_results/logs_*.csv";
+  let root;
+  try {
+    root = await getDeviceRootFolder(selectedDeviceId);
+  } catch (err) {
+    console.error("Failed to resolve root folder:", err);
+    const ul = document.getElementById("test-results-list");
+    ul.innerHTML = "<li style='color: red;'>Failed to resolve device folder</li>";
+    return;
+  }
+
+  const path = `${root}/test_results/logs_*.csv`;
   const url = `/api/device/test_results_files?session=${session_token}&device=${selectedDeviceId}&path=${encodeURIComponent(path)}`;
 
   fetch(url)
     .then(res => res.json())
     .then(files => {
-      const ul = document.getElementById("test-results-list");
-      ul.innerHTML = "";
-
-      files.forEach(file => {
-        const li = document.createElement("li");
-        li.textContent = file.display_name;
-        li.dataset.path = file.path;
-        li.style.cursor = "pointer";
-
-        li.onclick = (event) => {
-          const existingMenu = document.getElementById("context-menu");
-          if (existingMenu) existingMenu.remove();
-
-          const menu = document.createElement("div");
-          menu.id = "context-menu";
-          menu.style.position = "fixed";
-          menu.style.background = "#fff";
-          menu.style.border = "1px solid #ccc";
-          menu.style.boxShadow = "0 2px 6px rgba(0,0,0,0.15)";
-          menu.style.padding = "5px 0";
-          menu.style.minWidth = "150px";
-          menu.style.zIndex = 9999;
-          menu.style.top = `${event.clientY}px`;
-          menu.style.left = `${event.clientX}px`;
-
-          const createMenuItem = (label, onClick) => {
-            const item = document.createElement("div");
-            item.textContent = label;
-            item.style.padding = "6px 12px";
-            item.style.cursor = "pointer";
-            item.style.color = "#000";
-            item.style.background = "#fff";
-            item.onmouseenter = () => item.style.background = "#eee";
-            item.onmouseleave = () => item.style.background = "#fff";
-            item.onclick = () => {
-              onClick();
-              menu.remove();
-            };
-            return item;
-          };
-
-          // Open
-          menu.appendChild(createMenuItem("Open", () => {
-            handleConnectClick(file.path);
-          }));
-
-          // Download as submenu container
-          const downloadAs = document.createElement("div");
-          downloadAs.textContent = "Download as ▸";
-          downloadAs.style.position = "relative";
-          downloadAs.style.padding = "6px 12px";
-          downloadAs.style.cursor = "pointer";
-          downloadAs.style.color = "#000";
-          downloadAs.style.background = "#fff";
-          downloadAs.onmouseenter = () => submenu.style.display = "block";
-          downloadAs.onmouseleave = () => submenu.style.display = "none";
-
-          // Submenu
-          const submenu = document.createElement("div");
-          submenu.style.display = "none";
-          submenu.style.position = "absolute";
-          submenu.style.left = "100%";
-          submenu.style.top = "0";
-          submenu.style.background = "#fff";
-          submenu.style.border = "1px solid #ccc";
-          submenu.style.boxShadow = "0 2px 6px rgba(0,0,0,0.15)";
-          submenu.style.minWidth = "100px";
-
-          submenu.appendChild(createMenuItem("CSV", () => {
-            downloadLogFile(file.path, "text/csv");
-          }));
-
-          submenu.appendChild(createMenuItem("Excel", () => {
-            downloadLogFile(file.path, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
-          }));
-
-          downloadAs.appendChild(submenu);
-          menu.appendChild(downloadAs);
-
-          document.body.appendChild(menu);
-
-          // Cleanup
-          const removeMenu = (e) => {
-            if (!menu.contains(e.target)) {
-              menu.remove();
-              document.removeEventListener("click", removeMenu);
-            }
-          };
-          setTimeout(() => document.addEventListener("click", removeMenu), 0);
-        };
-
-        ul.appendChild(li);
-      });
-
+      renderTestResultRows(document.getElementById("test-results-body"), files);
     })
     .catch(err => {
       console.error("Failed to load test results:", err);
-      document.getElementById("test-results-list").innerHTML =
-        "<li style='color: red;'>Failed to load test results</li>";
+      const body = document.getElementById("test-results-body");
+      if (body) {
+        body.innerHTML =
+          "<tr><td colspan='3' style='color: red;'>Failed to load test results</td></tr>";
+      }
     });
+}
+
+function fmtFileSize(b) {
+  if (typeof b !== "number") return "";
+  if (b < 1024) return `${b} B`;
+  if (b < 1024 * 1024) return `${(b / 1024).toFixed(1)} KB`;
+  return `${(b / 1024 / 1024).toFixed(1)} MB`;
+}
+
+// Render Test Results rows (Name / Date / Size) into a <tbody>, shared by
+// vcat-d and vcat-ai. Row click opens the Open/Download context menu.
+function renderTestResultRows(body, files) {
+  if (!body) return;
+  body.innerHTML = "";
+  files.forEach(file => {
+    const tr = document.createElement("tr");
+    tr.dataset.path = file.path;
+
+    const nameTd = document.createElement("td");
+    nameTd.textContent = file.filename;
+    const dateTd = document.createElement("td");
+    dateTd.textContent = file.date || "";
+    const sizeTd = document.createElement("td");
+    sizeTd.className = "size-col";
+    sizeTd.textContent = fmtFileSize(file.size);
+
+    tr.append(nameTd, dateTd, sizeTd);
+    tr.onclick = (event) => openTestResultMenu(event, file.path);
+    body.appendChild(tr);
+  });
+}
+
+// Context menu (Open / Download as CSV|Excel) for a test-result row.
+function openTestResultMenu(event, filePath) {
+  const existingMenu = document.getElementById("context-menu");
+  if (existingMenu) existingMenu.remove();
+
+  const menu = document.createElement("div");
+  menu.id = "context-menu";
+  menu.style.position = "fixed";
+  menu.style.background = "#fff";
+  menu.style.border = "1px solid #ccc";
+  menu.style.boxShadow = "0 2px 6px rgba(0,0,0,0.15)";
+  menu.style.padding = "5px 0";
+  menu.style.minWidth = "150px";
+  menu.style.zIndex = 9999;
+  menu.style.top = `${event.clientY}px`;
+  menu.style.left = `${event.clientX}px`;
+
+  const createMenuItem = (label, onClick) => {
+    const item = document.createElement("div");
+    item.textContent = label;
+    item.style.padding = "6px 12px";
+    item.style.cursor = "pointer";
+    item.style.color = "#000";
+    item.style.background = "#fff";
+    item.onmouseenter = () => item.style.background = "#eee";
+    item.onmouseleave = () => item.style.background = "#fff";
+    item.onclick = () => {
+      onClick();
+      menu.remove();
+    };
+    return item;
+  };
+
+  // Open
+  menu.appendChild(createMenuItem("Open", () => {
+    handleConnectClick(filePath);
+  }));
+
+  // Download as submenu container
+  const downloadAs = document.createElement("div");
+  downloadAs.textContent = "Download as ▸";
+  downloadAs.style.position = "relative";
+  downloadAs.style.padding = "6px 12px";
+  downloadAs.style.cursor = "pointer";
+  downloadAs.style.color = "#000";
+  downloadAs.style.background = "#fff";
+  downloadAs.onmouseenter = () => submenu.style.display = "block";
+  downloadAs.onmouseleave = () => submenu.style.display = "none";
+
+  // Submenu
+  const submenu = document.createElement("div");
+  submenu.style.display = "none";
+  submenu.style.position = "absolute";
+  submenu.style.left = "100%";
+  submenu.style.top = "0";
+  submenu.style.background = "#fff";
+  submenu.style.border = "1px solid #ccc";
+  submenu.style.boxShadow = "0 2px 6px rgba(0,0,0,0.15)";
+  submenu.style.minWidth = "100px";
+
+  submenu.appendChild(createMenuItem("CSV", () => {
+    downloadLogFile(filePath, "text/csv");
+  }));
+
+  submenu.appendChild(createMenuItem("Excel", () => {
+    downloadLogFile(filePath, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+  }));
+
+  downloadAs.appendChild(submenu);
+  menu.appendChild(downloadAs);
+
+  document.body.appendChild(menu);
+
+  // Cleanup
+  const removeMenu = (e) => {
+    if (!menu.contains(e.target)) {
+      menu.remove();
+      document.removeEventListener("click", removeMenu);
+    }
+  };
+  setTimeout(() => document.addEventListener("click", removeMenu), 0);
 }
 
 async function pickExportPath() {
