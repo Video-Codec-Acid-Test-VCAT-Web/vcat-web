@@ -17,8 +17,9 @@ const COLORS = [
 
 
 
-function fetchDeviceInfo(deviceId) {
-    return fetch(`${API_BASE}/api/device/info?session=${session_token}&device=${deviceId}`)
+function fetchDeviceInfo(deviceId, refresh = false) {
+    const r = refresh ? "&refresh=1" : "";
+    return fetch(`${API_BASE}/api/device/info?session=${session_token}&device=${deviceId}${r}`)
       .then(res => res.json())
       .catch(err => {
         console.error("❌ Failed to fetch device info:", err);
@@ -42,6 +43,93 @@ function waitForChartAndStartPolling() {
 }
 
 
+
+function setBtnEnabled(btn, enabled) {
+  if (!btn) return;
+  btn.style.pointerEvents = enabled ? "auto" : "none";
+  btn.style.opacity = enabled ? "1.0" : "0.4";
+  btn.style.cursor = enabled ? "pointer" : "not-allowed";
+}
+
+async function isVcatRunning(deviceId, app = "vcat_d") {
+  try {
+    const res = await fetch(
+      `/api/device/vcat_running?session=${session_token}&device=${deviceId}&app=${app}`
+    );
+    if (!res.ok) return false;
+    return !!(await res.json()).running;
+  } catch (err) {
+    console.error("vcat_running check failed:", err);
+    return false;
+  }
+}
+
+// vcat-d toolbar: Launch is enabled only when the app is NOT running; Connect /
+// Run Config / Console are enabled only when it IS running.
+async function updateVcatdToolbar(deviceId) {
+  if (!deviceId) return;
+  const running = await isVcatRunning(deviceId);
+  setBtnEnabled(document.getElementById("launch-btn"), !running);
+  setBtnEnabled(document.getElementById("connect-btn"), running);
+  setBtnEnabled(document.getElementById("run-config-btn"), running);
+  setBtnEnabled(document.getElementById("console-btn"), running);
+}
+
+async function handleLaunchClick() {
+  const deviceId = document.getElementById("device")?.value;
+  if (!deviceId) return;
+
+  setBtnEnabled(document.getElementById("launch-btn"), false); // guard against double-click
+  try {
+    await fetch(`/api/device/launch_vcat?session=${session_token}&device=${deviceId}`);
+  } catch (err) {
+    console.error("Launch failed:", err);
+  }
+
+  // The app takes a moment to come up — poll until it reports running.
+  for (let i = 0; i < 12; i++) {
+    if (await isVcatRunning(deviceId)) break;
+    await new Promise(r => setTimeout(r, 800));
+  }
+  updateVcatdToolbar(deviceId);
+
+  // App is up now — refresh device info so the newly-available IP shows.
+  const info = await fetchDeviceInfo(deviceId, true);
+  if (info) populateDeviceInfo(info);
+  updateConsoleLog();
+}
+
+// vcat-ai toolbar: same enable/disable rule as vcat-d, but only Launch is wired.
+// Connect / Run Config / Console reflect running state yet do nothing on click.
+async function updateAiToolbar(deviceId) {
+  if (!deviceId) return;
+  const running = await isVcatRunning(deviceId, "vcat_ai");
+  setBtnEnabled(document.getElementById("ai-launch-btn"), !running);
+  setBtnEnabled(document.getElementById("ai-connect-btn"), running);
+  setBtnEnabled(document.getElementById("ai-run-config-btn"), running);
+  setBtnEnabled(document.getElementById("ai-console-btn"), running);
+}
+
+async function handleAiLaunchClick() {
+  const deviceId = document.getElementById("device")?.value;
+  if (!deviceId) return;
+
+  setBtnEnabled(document.getElementById("ai-launch-btn"), false);
+  try {
+    await fetch(`/api/device/launch_vcat?session=${session_token}&device=${deviceId}&app=vcat_ai`);
+  } catch (err) {
+    console.error("vcat-ai launch failed:", err);
+  }
+
+  for (let i = 0; i < 12; i++) {
+    if (await isVcatRunning(deviceId, "vcat_ai")) break;
+    await new Promise(r => setTimeout(r, 800));
+  }
+  updateAiToolbar(deviceId);
+
+  // App is up now — refresh vcat-ai device details (IP etc. now available).
+  loadAiDeviceInfo(deviceId);
+}
 
 async function setDeviceConnectionState() {
   const deviceId = selectedDevice;
@@ -347,6 +435,13 @@ function extractIpBase(raw) {
   return raw.replace(/^https?:\/\//, "").split(":")[0] || "—";
 }
 
+// Like extractIpBase but keeps the port (important: both apps bind 0.0.0.0,
+// so the port is what distinguishes vcat-d from vcat-ai).
+function formatIpAddr(raw) {
+  if (!raw || typeof raw !== "string") return "—";
+  return raw.replace(/^https?:\/\//, "") || "—";
+}
+
 function openDeviceModal() {
   if (!currentDeviceInfo) {
     document.getElementById("device-ip").textContent = "Unavailable";
@@ -355,7 +450,7 @@ function openDeviceModal() {
 
   const d = currentDeviceInfo;
 
-  document.getElementById("device-ip").textContent = extractIpBase(d.ip_addr);
+  document.getElementById("device-ip").textContent = formatIpAddr(d.ip_addr);
 
   document.getElementById("device-display").textContent = `${d.display_resolution.width}×${d.display_resolution.height}`;
   document.getElementById("device-soc").textContent = `${d.soc_manufacturer} ${d.soc}`;
@@ -1089,6 +1184,10 @@ function handleDeviceSelection() {
     // (independent of going live).
     setupAppTabs(selectedDeviceId);
 
+    // Enable/disable the vcat-d toolbar (Launch vs Connect/Run Config/Console)
+    // based on whether the app is currently running.
+    updateVcatdToolbar(selectedDeviceId);
+
     fetchDeviceInfo(selectedDeviceId).then(info => {
       if (info) {
         populateDeviceInfo(info);
@@ -1123,6 +1222,12 @@ function pingDevice() {
 // Far-left app rail: on connect, detect which VCAT builds are installed on the
 // device and render one tab per installed app. vcat-d hosts the full monitor UI;
 // vcat-ai is a placeholder for now. An app that isn't installed gets no tab.
+// Logo + hover text for each app-rail tab.
+const APP_RAIL_ICONS = {
+  vcat_d: { logo: "/static/vcat_d_logo.png", hover: "vcat-d" },
+  vcat_ai: { logo: "/static/vcat_ai_logo.png", hover: "vcat-ai" },
+};
+
 async function setupAppTabs(deviceId) {
   const rail = document.getElementById("app-rail");
   if (!rail) return;
@@ -1151,7 +1256,19 @@ async function setupAppTabs(deviceId) {
     const btn = document.createElement("button");
     btn.className = "app-rail-btn";
     btn.id = `app-rail-btn-${app.id}`;
-    btn.textContent = app.label;
+
+    const icon = APP_RAIL_ICONS[app.id];
+    if (icon) {
+      btn.title = icon.hover;
+      const img = document.createElement("img");
+      img.src = icon.logo;
+      img.alt = app.label;
+      btn.appendChild(img);
+    } else {
+      btn.textContent = app.label;
+      btn.title = app.label;
+    }
+
     btn.onclick = () => showAppTab(app.id);
     rail.appendChild(btn);
   });
@@ -1173,15 +1290,49 @@ function showAppTab(appId) {
     loadAiDeviceInfo(dev);
     loadAiTests(dev);
     loadAiTestResults(dev);
+    updateAiToolbar(dev);
     showAiSubTab("tests");
   }
 
   sizeScrollAreas();
 }
 
-// vcat-ai has no root-folder broadcast yet, so its data folder is fixed for now.
-// (When vcat-ai adds ACTION_LOG_ROOT, swap this for a getDeviceRootFolder-style call.)
-const VCAT_AI_ROOT = "/sdcard/vcat-ai";
+// Filesystem-scan folder discovery, keyed by device id. Finds each installed
+// app's data folder by its log files — no app needs to be running (non-live).
+const scannedFoldersCache = {};
+const scanPromiseCache = {};
+
+async function getScannedFolders(deviceId) {
+  if (scannedFoldersCache[deviceId]) return scannedFoldersCache[deviceId];
+
+  // Dedupe concurrent scans (device selection kicks off several loaders at once).
+  if (!scanPromiseCache[deviceId]) {
+    scanPromiseCache[deviceId] = (async () => {
+      try {
+        const res = await fetch(
+          `/api/device/scan_folders?session=${session_token}&device=${deviceId}`
+        );
+        return res.ok ? await res.json() : {};
+      } catch (err) {
+        console.error("Folder scan failed:", err);
+        return {};
+      }
+    })();
+  }
+
+  const folders = await scanPromiseCache[deviceId];
+  if (Object.keys(folders).length) {
+    scannedFoldersCache[deviceId] = folders; // cache only a successful scan
+  } else {
+    delete scanPromiseCache[deviceId]; // allow a retry later (e.g. after a test runs)
+  }
+  return folders;
+}
+
+async function getAppRoot(deviceId, appId) {
+  const folders = await getScannedFolders(deviceId);
+  return folders && folders[appId] ? folders[appId].root : null;
+}
 
 function showAiSubTab(name) {
   ["tests", "test-results"].forEach(key => {
@@ -1196,7 +1347,12 @@ function showAiSubTab(name) {
 async function loadAiTests(deviceId) {
   if (!deviceId) return;
   const ul = document.getElementById("ai-tests-list");
-  const path = `${VCAT_AI_ROOT}/tests/*`;
+  const root = await getAppRoot(deviceId, "vcat_ai");
+  if (!root) {
+    ul.innerHTML = "<li style='color:#aaa;'>No vcat-ai data found on device</li>";
+    return;
+  }
+  const path = `${root}/tests/*`;
   try {
     const res = await fetch(
       `/api/device/files?session=${session_token}&device=${deviceId}&path=${encodeURIComponent(path)}`
@@ -1218,7 +1374,13 @@ async function loadAiTests(deviceId) {
 async function loadAiTestResults(deviceId) {
   if (!deviceId) return;
   const body = document.getElementById("ai-test-results-body");
-  const path = `${VCAT_AI_ROOT}/test_results/*.csv`;
+  const root = await getAppRoot(deviceId, "vcat_ai");
+  if (!root) {
+    body.innerHTML =
+      "<tr><td colspan='3' style='color:#aaa;'>No vcat-ai data found on device</td></tr>";
+    return;
+  }
+  const path = `${root}/test_results/*.csv`;
   try {
     const res = await fetch(
       `/api/device/test_results_files?session=${session_token}&device=${deviceId}&path=${encodeURIComponent(path)}`
@@ -1263,11 +1425,56 @@ function setupAiTelemetryCanvas(tabId) {
     grid.appendChild(makeChartWrapper("tempChart", "Temperature"));
   }
 
+  // vcat-ai test details are a rich nested structure, not vcat-d's fixed fields —
+  // replace them with a scrollable container, and drop the (live-only) player controls.
+  const detailsTop = clone.querySelector(".test-details-top");
+  if (detailsTop) {
+    detailsTop.innerHTML = "";
+    const h3 = document.createElement("h3");
+    h3.textContent = "Test Details";
+    const box = document.createElement("div");
+    box.className = "ai-test-details";
+    box.id = `${tabId}-ai-test-details`;
+    detailsTop.append(h3, box);
+  }
+  const pc = clone.querySelector(".player-controls");
+  if (pc) pc.remove();
+
   clone.querySelectorAll("canvas[data-id]").forEach(canvas => {
     canvas.id = `${tabId}-${canvas.getAttribute("data-id")}`;
   });
 
   document.getElementById(`${tabId}-tab`).appendChild(clone);
+}
+
+// Recursively render a nested test-details object into readable rows.
+function buildAiTestNode(key, value) {
+  const row = document.createElement("div");
+  row.className = "ai-test-row";
+  const strong = document.createElement("strong");
+
+  if (value !== null && typeof value === "object") {
+    strong.textContent = `${key}:`;
+    row.appendChild(strong);
+    const children = document.createElement("div");
+    children.className = "ai-test-children";
+    Object.entries(value).forEach(([k, v]) => children.appendChild(buildAiTestNode(k, v)));
+    row.appendChild(children);
+  } else {
+    strong.textContent = `${key}: `;
+    row.append(strong, document.createTextNode(String(value)));
+  }
+  return row;
+}
+
+function renderAiTestDetails(container, testObj) {
+  if (!container) return;
+  container.innerHTML = "";
+  if (!testObj || typeof testObj !== "object" || !Object.keys(testObj).length) {
+    container.textContent = "No test details.";
+    return;
+  }
+  Object.entries(testObj).forEach(([k, v]) => container.appendChild(buildAiTestNode(k, v)));
 }
 
 // Build a chart-wrapper containing a canvas with the given data-id (prefixed
@@ -1438,7 +1645,7 @@ function openAiLogFile(filePath) {
     .then(res => res.json())
     .then(data => {
       const telemetry = data.telemetry_data;
-      if (data.test_details) updateTestDetailsUI({ test_details: data.test_details }, tabId);
+      renderAiTestDetails(document.getElementById(`${tabId}-ai-test-details`), data.ai_test);
       updateCpuChart(telemetry, tabId);
       updateBatteryChart(telemetry, tabId);
       updateFreqChart(telemetry, tabId);
@@ -1487,7 +1694,7 @@ async function loadAiDeviceInfo(deviceId) {
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const info = await res.json();
 
-    set("ai-device-ip", extractIpBase(info.ip_addr));
+    set("ai-device-ip", formatIpAddr(info.ip_addr));
 
     const dr = info.displayResolution || {};
     set("ai-device-display", dr.width && dr.height ? `${dr.width}×${dr.height}` : "—");
@@ -1546,6 +1753,154 @@ function sizeScrollAreas() {
 
 window.addEventListener("resize", sizeScrollAreas);
 
+// ---- Telemetry view modes: Grid <-> Focus, per telemetry tab ----
+// Grid: all charts equal (current). Focus: one large "stage" chart + the rest
+// as a scrollable filmstrip on the left. State is kept per tab.
+const viewStateByTabId = {};
+
+function paneOf(tabId) {
+  return document.getElementById(`${tabId}-tab`);
+}
+
+function tabIdFromNode(node) {
+  const pane = node.closest(".tab-pane, .ai-tab-pane");
+  return pane ? pane.id.replace(/-tab$/, "") : null;
+}
+
+function wrapperTitle(w) {
+  const h = w.querySelector("h3");
+  return h ? h.textContent.trim() : "";
+}
+
+function resizeTabCharts(tabId) {
+  const charts = chartsByTabId[tabId];
+  if (!charts) return;
+  requestAnimationFrame(() => {
+    Object.values(charts).forEach(c => {
+      if (c && typeof c.resize === "function") c.resize();
+    });
+  });
+}
+
+function sizeFocusAreas(tabId) {
+  const st = viewStateByTabId[tabId];
+  if (!st || st.mode !== "focus") return;
+  const pane = paneOf(tabId);
+  const focus = pane && pane.querySelector(".tele-focus");
+  if (!focus || focus.offsetParent === null) return;
+  const top = focus.getBoundingClientRect().top;
+  focus.style.height = `${Math.max(300, window.innerHeight - top - 15)}px`;
+}
+
+function setViewModeFromBtn(btn, mode) {
+  const tabId = tabIdFromNode(btn);
+  if (tabId) setViewMode(tabId, mode);
+}
+
+function setViewMode(tabId, mode) {
+  const pane = paneOf(tabId);
+  if (!pane) return;
+  const grid = pane.querySelector(".dashboard-grid");
+  const focus = pane.querySelector(".tele-focus");
+  if (!grid || !focus) return;
+
+  const st = (viewStateByTabId[tabId] ||= { mode: "grid", focusedTitle: null, wrappers: null });
+  // Capture canonical wrapper order once (all charts exist by first toggle).
+  if (!st.wrappers) st.wrappers = [...grid.querySelectorAll(":scope > .chart-wrapper")];
+
+  pane.querySelectorAll(".mode-btn").forEach(b =>
+    b.classList.toggle("active", b.dataset.mode === mode));
+
+  if (mode === "focus") {
+    st.mode = "focus";
+    layoutFocus(tabId);
+    grid.style.display = "none";
+    focus.style.display = "flex";
+    sizeFocusAreas(tabId);
+    resizeTabCharts(tabId);
+  } else {
+    st.mode = "grid";
+    st.wrappers.forEach(w => {
+      w.classList.remove("thumb");
+      w.onclick = null;
+      grid.appendChild(w); // back to canonical order
+    });
+    focus.style.display = "none";
+    grid.style.display = "grid";
+    resizeTabCharts(tabId);
+  }
+}
+
+// Place the focused wrapper in the stage; the rest (canonical order) in the filmstrip.
+function layoutFocus(tabId) {
+  const st = viewStateByTabId[tabId];
+  const pane = paneOf(tabId);
+  if (!st || !pane) return;
+  const filmstrip = pane.querySelector(".tele-filmstrip");
+  const stage = pane.querySelector(".tele-stage");
+
+  let focused = st.focusedTitle && st.wrappers.find(w => wrapperTitle(w) === st.focusedTitle);
+  if (!focused) focused = st.wrappers.find(w => wrapperTitle(w).startsWith("CPU Usage"));
+  if (!focused) focused = st.wrappers[0];
+  st.focusedTitle = wrapperTitle(focused);
+
+  filmstrip.innerHTML = "";
+  stage.innerHTML = "";
+  st.wrappers.forEach(w => {
+    if (w === focused) {
+      w.classList.remove("thumb");
+      w.onclick = null;
+      stage.appendChild(w);
+    } else {
+      w.classList.add("thumb");
+      w.onclick = () => {
+        st.focusedTitle = wrapperTitle(w);
+        layoutFocus(tabId);
+        sizeFocusAreas(tabId);
+        resizeTabCharts(tabId);
+      };
+      filmstrip.appendChild(w);
+    }
+  });
+}
+
+function cycleFocus(tabId, dir) {
+  const st = viewStateByTabId[tabId];
+  if (!st || st.mode !== "focus" || !st.wrappers || !st.wrappers.length) return;
+  const titles = st.wrappers.map(wrapperTitle);
+  let idx = titles.indexOf(st.focusedTitle);
+  if (idx < 0) idx = 0;
+  idx = (idx + dir + titles.length) % titles.length;
+  st.focusedTitle = titles[idx];
+  layoutFocus(tabId);
+  sizeFocusAreas(tabId);
+  resizeTabCharts(tabId);
+}
+
+function currentVisibleFocusTab() {
+  for (const [tabId, st] of Object.entries(viewStateByTabId)) {
+    if (st.mode === "focus") {
+      const pane = paneOf(tabId);
+      if (pane && pane.offsetParent !== null) return tabId;
+    }
+  }
+  return null;
+}
+
+// Keyboard: Up/Down cycles the focused chart in the visible focus-mode tab.
+document.addEventListener("keydown", (e) => {
+  if (e.key !== "ArrowUp" && e.key !== "ArrowDown") return;
+  const tabId = currentVisibleFocusTab();
+  if (!tabId) return;
+  e.preventDefault();
+  cycleFocus(tabId, e.key === "ArrowDown" ? 1 : -1);
+});
+
+window.addEventListener("resize", () => {
+  const tabId = currentVisibleFocusTab();
+  if (tabId) { sizeFocusAreas(tabId); resizeTabCharts(tabId); }
+});
+
 // Toggle the Playlists / Test Results sub-tabs in the vcat-d Device tab.
 function showDeviceSubTab(name) {
   const tabs = { playlists: "playlists-subtab", "test-results": "test-results-subtab" };
@@ -1585,7 +1940,7 @@ function populateDeviceInfo(info) {
     return;
   }
 
-  document.getElementById("device-ip").textContent = extractIpBase(info.ip_addr);
+  document.getElementById("device-ip").textContent = formatIpAddr(info.ip_addr);
 
   document.getElementById("device-display").textContent =
     `${info.display_resolution.width}×${info.display_resolution.height}`;
@@ -1715,13 +2070,10 @@ async function loadPlaylistFiles() {
   const selectedDeviceId = deviceSelect?.value;
   if (!selectedDeviceId) return;
 
-  let root;
-  try {
-    root = await getDeviceRootFolder(selectedDeviceId);
-  } catch (err) {
-    console.error("Failed to resolve root folder:", err);
-    const ul = document.getElementById("playlist-list");
-    ul.innerHTML = "<li style='color: red;'>Failed to resolve device folder</li>";
+  const ul = document.getElementById("playlist-list");
+  const root = await getAppRoot(selectedDeviceId, "vcat_d");
+  if (!root) {
+    ul.innerHTML = "<li style='color:#aaa;'>No vcat-d data found on device</li>";
     return;
   }
 
@@ -1757,17 +2109,17 @@ async function loadTestResults() {
   const selectedDeviceId = deviceSelect?.value;
   if (!selectedDeviceId) return;
 
-  let root;
-  try {
-    root = await getDeviceRootFolder(selectedDeviceId);
-  } catch (err) {
-    console.error("Failed to resolve root folder:", err);
-    const ul = document.getElementById("test-results-list");
-    ul.innerHTML = "<li style='color: red;'>Failed to resolve device folder</li>";
+  const body = document.getElementById("test-results-body");
+  const root = await getAppRoot(selectedDeviceId, "vcat_d");
+  if (!root) {
+    if (body) {
+      body.innerHTML =
+        "<tr><td colspan='3' style='color:#aaa;'>No vcat-d data found on device</td></tr>";
+    }
     return;
   }
 
-  const path = `${root}/test_results/logs_*.csv`;
+  const path = `${root}/test_results/*.csv`;
   const url = `/api/device/test_results_files?session=${session_token}&device=${selectedDeviceId}&path=${encodeURIComponent(path)}`;
 
   fetch(url)

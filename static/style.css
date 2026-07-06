@@ -2,7 +2,8 @@ body {
     font-family: sans-serif;
     margin: 0;
     padding: 0;
-    background: linear-gradient(135deg, #FFA500, #FF6600);
+    background: url('/static/background.png') no-repeat center center fixed;
+    background-size: cover;
     color: #fff;
     position: relative;
 }
@@ -455,7 +456,8 @@ html, body {
   height: auto;
   min-height: 100%;
   overflow-y: auto;
-  background: #FFA500; /* orange background */
+  background: url('/static/background.png') no-repeat center center fixed;
+  background-size: cover;
 }
 
 .test-results-fieldset {
@@ -488,6 +490,110 @@ html, body {
   color: white;
   font-family: monospace;
   font-size: 13px;
+}
+
+/* Telemetry view-mode toggle (Grid / Focus) */
+.view-mode-toggle {
+  display: inline-flex;
+  margin-left: 16px;
+}
+
+.mode-btn {
+  padding: 5px 10px;
+  background: #333;
+  color: #ddd;
+  border: 1px solid #888;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.mode-btn:first-child { border-radius: 6px 0 0 6px; }
+.mode-btn:last-child { border-radius: 0 6px 6px 0; border-left: none; }
+
+.mode-btn.active {
+  background: #0a7;
+  color: #fff;
+  border-color: #0a7;
+  font-weight: bold;
+}
+
+/* Focus mode: scrollable filmstrip (left) + large stage (right) */
+.tele-focus {
+  display: flex;
+  gap: 16px;
+  padding: 10px;
+  box-sizing: border-box;
+}
+
+.tele-filmstrip {
+  flex: 0 0 200px;
+  overflow-y: auto;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.tele-stage {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 100%;
+  overflow: auto;
+}
+
+/* Focused Test Details panel fills the stage height; its inner box scrolls
+   only when content actually exceeds the full height (not a fixed 300px). */
+.tele-stage > .chart-wrapper:has(.test-details-top) {
+  height: 100%;
+  box-sizing: border-box;
+}
+
+.tele-stage .test-details-top {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  height: 100%;
+}
+
+.tele-stage .ai-test-details {
+  max-height: none;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+/* Thumbnails in the filmstrip: compact, name shown on hover */
+.chart-wrapper.thumb {
+  position: relative;
+  max-height: 150px;
+  overflow: hidden;
+  cursor: pointer;
+  border: 1px solid #444;
+  border-radius: 4px;
+  padding: 4px;
+  flex: 0 0 auto;
+}
+
+.chart-wrapper.thumb:hover {
+  border-color: #0a7;
+}
+
+.chart-wrapper.thumb h3 {
+  display: none;
+  position: absolute;
+  top: 4px;
+  left: 4px;
+  margin: 0;
+  padding: 2px 6px;
+  background: rgba(0, 0, 0, 0.8);
+  color: #fff;
+  font-size: 12px;
+  border-radius: 3px;
+  z-index: 5;
+  white-space: nowrap;
+}
+
+.chart-wrapper.thumb:hover h3 {
+  display: block;
 }
 
 /* File-explorer style table for Test Results.
@@ -554,6 +660,26 @@ html, body {
   color: white;
 }
 
+/* vcat-ai Test Details: scrollable nested key/value view */
+.ai-test-details {
+  max-height: 300px;
+  overflow-y: auto;
+  font-family: monospace;
+  font-size: 12px;
+  background: #111;
+  border: 1px solid #444;
+  border-radius: 4px;
+  padding: 8px;
+}
+
+.ai-test-children {
+  margin-left: 14px;
+}
+
+.ai-test-row {
+  line-height: 1.4;
+}
+
 /* Compact typography for the vcat-ai details cards */
 #app-panel-vcat_ai h3 {
   margin: 8px 0 4px;
@@ -591,22 +717,31 @@ html, body {
 }
 
 .app-rail-btn {
-  padding: 12px 14px;
-  background: #333;
+  padding: 6px;
+  background: transparent;
   color: #ddd;
-  border: 1px solid #888;
+  border: 2px solid transparent;
   border-radius: 6px;
   cursor: pointer;
   font-weight: bold;
   font-size: 14px;
-  text-align: left;
+  text-align: center;
   white-space: nowrap;
 }
 
+.app-rail-btn img {
+  display: block;
+  width: 76px;
+  height: auto;
+}
+
+.app-rail-btn:hover {
+  border-color: #888;
+}
+
+/* Active tab: border highlight only — keep the area behind the logo transparent. */
 .app-rail-btn.active {
-  background: #555;
-  color: #fff;
-  border-color: #fff;
+  border-color: #0a7;
 }
 
 .under-construction {

@@ -21,7 +21,7 @@
             </fieldset>
         </div>
         <!--device wrapper -->
-        <div class="header" style="position: absolute; left: 50%; top: 20px; transform: translateX(0); display: flex; align-items: center; gap: 20px;"> <img src="/static/VCAT_Logo_tnsp.png" alt="VCAT Logo" class="logo" style="height: 80px; width: auto;" />
+        <div class="header" style="position: absolute; left: 50%; top: 20px; transform: translateX(0); display: flex; align-items: center; gap: 20px;"> <img src="/static/vcat_d_logo.png" alt="VCAT Logo" class="logo" style="height: 80px; width: auto;" />
             <div class="title-text">
                 <h1 style="font-size: 48px; font-weight: bold; margin: 0;">VCAT</h1>
                 <p class="subtitle" style="font-size: 18px; margin: 5px 0 0 0; color: #f2f2f2;">Remote Monitor</p>
@@ -63,7 +63,7 @@
                   align-items: center;
                   margin-top: 10px;
                   margin-bottom: 10px;
-                "> <img alt="Connect" id="connect-btn" onclick="handleConnectClick('Live')" src="/static/btn_connect_device.png" style="width: 36px; height: 36px; cursor: pointer;" title="Connect (Go Live)" /> <img alt="Run Config" id="run-config-btn" onclick="openRunConfigModal()" src="/static/btn_run_config.png" style="width: 36px; height: 36px; cursor: pointer;" title="Run Config" /> <img alt="Console" id="console-btn" onclick="openConsoleModal()" src="/static/btn_console.png" style="width: 36px; height: 36px; cursor: pointer;" title="Open Console" /> </div>
+                "> <img alt="Launch VCAT-D" id="launch-btn" onclick="handleLaunchClick()" src="/static/btn_launch_vcat.png" style="width: 36px; height: 36px; cursor: pointer;" title="Launch VCAT-D" /> <img alt="Connect" id="connect-btn" onclick="handleConnectClick('Live')" src="/static/btn_connect_device.png" style="width: 36px; height: 36px; cursor: pointer;" title="Connect (Go Live)" /> <img alt="Run Config" id="run-config-btn" onclick="openRunConfigModal()" src="/static/btn_run_config.png" style="width: 36px; height: 36px; cursor: pointer;" title="Run Config" /> <img alt="Console" id="console-btn" onclick="openConsoleModal()" src="/static/btn_console.png" style="width: 36px; height: 36px; cursor: pointer;" title="Open Console" /> </div>
                     <h3>Device Details</h3>
                     <div style="display: flex; gap: 20px; align-items: flex-start;">
                         <div id="device-details" style="width: 400px; border: 1px solid #888; padding: 10px; border-radius: 6px;">
@@ -116,6 +116,12 @@
             </div>
             <div id="ai-tab-content">
             <div id="ai-device-tab" class="ai-tab-pane">
+              <div id="ai-device-toolbar" style="display: flex; gap: 10px; align-items: center; margin-bottom: 10px;">
+                <img alt="Launch VCAT-AI" id="ai-launch-btn" onclick="handleAiLaunchClick()" src="/static/btn_launch_vcat.png" style="width: 36px; height: 36px; cursor: pointer;" title="Launch VCAT-AI" />
+                <img alt="Connect" id="ai-connect-btn" src="/static/btn_connect_device.png" style="width: 36px; height: 36px; cursor: pointer;" title="Connect (Go Live)" />
+                <img alt="Run Config" id="ai-run-config-btn" src="/static/btn_run_config.png" style="width: 36px; height: 36px; cursor: pointer;" title="Run Config" />
+                <img alt="Console" id="ai-console-btn" onclick="openConsoleModal()" src="/static/btn_console.png" style="width: 36px; height: 36px; cursor: pointer;" title="Open Console" />
+              </div>
               <div class="ai-detail-row">
                 <div class="ai-detail-col">
                   <h3>Device Details</h3>
@@ -194,6 +200,10 @@
   ">
             <div style="display: flex; gap: 10px; align-items: center;">
                 <img alt="Reset Telemetry" class="reset-telemetry-btn" onclick="openResetModal()" src="/static/btn_reset_telemetry.png" style="width: 36px; height: 36px; cursor: pointer;" title="Reset Telemetry" />
+                <span class="view-mode-toggle">
+                    <button type="button" class="mode-btn active" data-mode="grid" onclick="setViewModeFromBtn(this,'grid')" title="Grid view">▦ Grid</button>
+                    <button type="button" class="mode-btn" data-mode="focus" onclick="setViewModeFromBtn(this,'focus')" title="Focus view (↑/↓ to cycle)">▭ Focus</button>
+                </span>
             </div>
             <div class="telemetry-status" style="color: #ccc; font-size: 14px;"></div>
         </div>
@@ -266,6 +276,10 @@
                 <canvas class="batteryChart" data-id="batteryChart"></canvas>
             </div>
 
+        </div>
+        <div class="tele-focus" style="display: none;">
+            <div class="tele-filmstrip"></div>
+            <div class="tele-stage"></div>
         </div>
     </template>
 

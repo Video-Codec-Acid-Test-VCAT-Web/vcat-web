@@ -867,11 +867,16 @@ class DeviceAccessException(Exception):
 
 
 def get_device_info(
-    session_id: str, device_id: str
+    session_id: str, device_id: str, refresh: bool = False
 ) -> Tuple[Optional[DeviceInfo], Optional[Response]]:
 
-    if device_id in device_info_cache:
+    if not refresh and device_id in device_info_cache:
         return device_info_cache[device_id], None
+
+    # On refresh, drop the cached IP so it's re-resolved (e.g. after launching
+    # the app, whose HTTP address only becomes available once it's running).
+    if refresh:
+        vcat_adb.ipCache.pop(device_id, None)
 
     def run_adb(cmd: List[str]) -> str:
         full_cmd = ["adb", "-s", device_id] + cmd
@@ -955,12 +960,21 @@ def get_device_info(
         info.soc = run_adb(["shell", "getprop", "ro.soc.model"])
         info.cpu.architecture = run_adb(["shell", "getprop", "ro.product.cpu.abi"])
 
-        ip_output = run_adb(["shell", "ip", "addr", "show", "wlan0"])
-        for line in ip_output.splitlines():
-            if "inet " in line:
-                ip_addr = line.strip().split()[1].split("/")[0]
-                info.ip_addr = ip_addr if ip_addr else "<none>"
-                break
+        # IP is reported by the app via broadcast->logcat, so it's only available
+        # once the app is running. Skip the (slow) broadcast when it isn't, and
+        # fall back to the device's wlan0 address.
+        app_addr = None
+        if is_vcat_running(session_id, device_id):
+            app_addr = vcat_adb.get_device_ip_and_port(session_id, device_id)
+        if app_addr:
+            info.ip_addr = app_addr
+        else:
+            ip_output = run_adb(["shell", "ip", "addr", "show", "wlan0"])
+            for line in ip_output.splitlines():
+                if "inet " in line:
+                    ip_addr = line.strip().split()[1].split("/")[0]
+                    info.ip_addr = ip_addr if ip_addr else "<none>"
+                    break
 
         for i in range(32):
             freq = run_adb(
@@ -1156,24 +1170,30 @@ def api_reset_session_console_log(session_id):
 ##########################################
 
 
-def is_vcat_running(session_id: str, device_id: str) -> bool:
-    package = "com.roncatech.vcat"
+def _package_for_app(app_id: str) -> str:
+    """Resolve an app id (vcat_d / vcat_ai) to its package; defaults to vcat-d."""
+    for p in VCAT_APP_PROFILES:
+        if p["id"] == app_id:
+            return p["package"]
+    return "com.roncatech.vcat"
+
+
+def is_vcat_running(session_id: str, device_id: str, package: str = "com.roncatech.vcat") -> bool:
     cmd = ["adb", "-s", device_id, "shell", "pidof", package]
     output = vcat_adb.run_adb_command_with_log(session_id, device_id, cmd)
     return bool(output and output.strip())
 
 
-def launch_vcat(session_id: str, device_id: str) -> Tuple[bool, bool]:
+def launch_vcat(session_id: str, device_id: str, package: str = "com.roncatech.vcat") -> Tuple[bool, bool]:
     """
-    Launches the VCAT app if it's not already running.
+    Launches the given VCAT app package if it's not already running.
 
     Returns:
         (launched, already_running)
     """
-    if is_vcat_running(session_id, device_id):
+    if is_vcat_running(session_id, device_id, package):
         return False, True
 
-    package = "com.roncatech.vcat"
     cmd = [
         "adb",
         "-s",
@@ -1195,14 +1215,16 @@ def launch_vcat(session_id: str, device_id: str) -> Tuple[bool, bool]:
 @app.route("/api/device/vcat_running")
 @require_valid_session_and_device
 def vcat_running(session_id, device_id):
-    running = is_vcat_running(session_id, device_id)
+    package = _package_for_app(request.args.get("app", "vcat_d"))
+    running = is_vcat_running(session_id, device_id, package)
     return jsonify({"running": running})
 
 
 @app.route("/api/device/launch_vcat")
 @require_valid_session_and_device
 def launch_vcat_api(session_id, device_id):
-    launched, already_running = launch_vcat(session_id, device_id)
+    package = _package_for_app(request.args.get("app", "vcat_d"))
+    launched, already_running = launch_vcat(session_id, device_id, package)
     return jsonify({"launched": launched, "already_running": already_running})
 
 
@@ -1334,8 +1356,8 @@ device_info_cache: LRUCache[str, DeviceInfo] = LRUCache(10)
 def api_device_info(session_id, device_id):
 
     try:
-
-        device_info, error_response = get_device_info(session_id, device_id)
+        refresh = request.args.get("refresh") in ("1", "true", "yes")
+        device_info, error_response = get_device_info(session_id, device_id, refresh=refresh)
         if error_response:
             return error_response
 
@@ -1532,6 +1554,16 @@ def api_device_vcat_apps(session_id, device_id):
     return jsonify(apps)
 
 
+@app.route("/api/device/scan_folders", methods=["GET"])
+@require_valid_session_and_device
+def api_device_scan_folders(session_id, device_id):
+    """
+    Filesystem scan for each app's data folder (no app running required).
+    Used for non-live log viewing. See vcat_adb.scan_vcat_data_folders.
+    """
+    return jsonify(vcat_adb.scan_vcat_data_folders(session_id, device_id))
+
+
 @app.route("/api/device/root_folder", methods=["GET"])
 @require_valid_session_and_device
 def api_device_root_folder(session_id, device_id):
@@ -1636,6 +1668,8 @@ def build_ai_telemetry_response(telemetry, device_id: str) -> dict:
         "timestamp": datetime.now().isoformat(),
         "device_id": device_id,
         "test_details": asdict(telemetry.test_details),
+        # Raw vcat-ai test object (name/id/createdAt/testCases[...]) for the panel.
+        "ai_test": telemetry.session_info.test,
         "telemetry_data": {
             "battery": [
                 {"elapsed_time": e.elapsed_time, "level": e.level}

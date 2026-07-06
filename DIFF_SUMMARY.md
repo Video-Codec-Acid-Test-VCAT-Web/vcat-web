@@ -6,7 +6,10 @@ via a far-left app-tab UI, and no longer relies on a fixed on-device data folder
 (B) **extended live telemetry** (GPU/NPU/thermal/frame-stats) collection and export; and
 (C) **vcat-ai log-file telemetry viewing** — open a vcat-ai log into its own chart tab,
 with vcat-ai-specific data model, AI processing-time series, and a temperature graph on
-both apps. (A and B are committed in `4fa2a5b`; C is the current change.)
+both apps; and (D) **non-live UX** — filesystem folder scan (view logs without the app
+running), Launch controls + app-running gating, device-info refresh after launch,
+scrollable vcat-ai Test Details, Grid/Focus view modes, and logo/background theming.
+(A/B → `4fa2a5b`; C → `237b96a`; D is the current change.)
 
 ---
 
@@ -138,20 +141,64 @@ both apps. (A and B are committed in `4fa2a5b`; C is the current change.)
   + system thermal (0–5) normalized so 0→0 and 5→top of graph. Added via `makeChartWrapper`
   (vcat-ai) / `injectTempChart` (vcat-d file view), leaving the vcat-d live tab untouched.
 
+## D. Non-live UX, folder scan, launch controls, view modes
+
+### Folder discovery via filesystem scan (no app running needed)
+- `vcat_adb.scan_vcat_data_folders()` + `GET /api/device/scan_folders`: locate each
+  app's folder by finding a `test_results` subdir with its log files
+  (`vcatd_log_*` / `logs_*` → vcat-d, `vcatai_log_*` → vcat-ai) via `find`, always also
+  probing the defaults `/sdcard/vcat-d` and `/sdcard/vcat-ai`. **Log viewing no longer
+  requires the app to be running.**
+- Frontend `getScannedFolders()` / `getAppRoot()` (cached, deduped) replace the broadcast
+  (`getDeviceRootFolder`) and the hard-coded `VCAT_AI_ROOT` for all four listings.
+- vcat-d test-results glob changed to `*.csv` so the new `vcatd_log_*.csv` names list
+  (timestamp still parsed via `(\d{10,})`).
+
+### Launch controls + app-running gating
+- `is_vcat_running` / `launch_vcat` + endpoints now take `?app=` (→ package via
+  `_package_for_app`). vcat-d & vcat-ai toolbars each have a **Launch** button
+  (`btn_launch_vcat.png`): Launch enabled only when the app is stopped; Connect / Run
+  Config / Console enabled only when running (`updateVcatdToolbar` / `updateAiToolbar`,
+  `handleLaunchClick` / `handleAiLaunchClick` poll until up).
+- vcat-ai **Console** button wired (`openConsoleModal`); Connect / Run Config still pending
+  vcat-ai HTTP-API decisions (live monitoring).
+
+### Device info after launch
+- `get_device_info(..., refresh=)` + `/api/device/info?refresh=1`: bypasses caches so the
+  IP (reported by the app's broadcast→logcat, only available once running) refreshes after
+  launch. IP now sourced from the broadcast when running, `wlan0` fallback otherwise.
+- IP display keeps the **port** (`formatIpAddr`) — both apps bind `0.0.0.0`, so the port is
+  the distinguisher.
+
+### vcat-ai Test Details
+- `SessionInfo.test` carries the raw log-header `test` object; `build_ai_telemetry_response`
+  emits it as `ai_test`. Frontend `renderAiTestDetails()` renders the nested tree in a
+  **scrollable** `.ai-test-details` panel (`TestConditions.from_dict` already tolerant).
+
+### Grid / Focus view modes (per telemetry tab)
+- Toggle in the telemetry toolbar. **Focus** = one large "stage" chart + a scrollable
+  left filmstrip of thumbnails (name on hover); click to promote, ↑/↓ to cycle.
+  Re-parents chart wrappers (Chart.js instances survive + `resize()`), per-tab state in
+  `viewStateByTabId`. Focused Test Details fills the stage height (`:has()` CSS).
+
+### Cosmetic
+- App-rail tabs are now logo buttons: `VCAT_Logo_tnsp.png` → `vcat_d_logo.png`,
+  `vcat_ai_logo.png`, transparent so the (transparent-PNG) logos aren't lost; active tab =
+  border highlight. Page background uses `background.png` instead of the orange gradient.
+
 ## ⚠️ Notes before pushing
 
 - **Debug timing values** are currently in place and should likely be reverted:
   - `vcat_config.py`: `DEVICE_POLL_INITIAL` and `DEVICE_POLL_STEADY` set to `2` (were
     10/30), `TELEMETRY_LOOP_POLL_INTERVAL` set to `2` (was 10).
   - `vcat_telemetry.py`: `console_cleanup_loop()` sleep set to `2s` (was 60s).
-- **vcat-ai data folder is hard-coded to `/sdcard/vcat-ai`** — vcat-ai does not yet answer
-  an `ACTION_LOG_ROOT` broadcast. Once it does, swap `VCAT_AI_ROOT` in `main.js` for
-  proper discovery (as done for vcat-d).
-- **Package name inconsistency remains**: `is_vcat_running`, `launch_vcat`,
-  `get_app_memory`, and the ADB broadcast still hard-code `com.roncatech.vcat`; only
-  gfxinfo uses the `VCAT_PACKAGE` config. Route these through the active app profile when
-  vcat-ai monitoring is built out.
+- **Live monitoring is still vcat-d-only.** `telemetry_dataset` is keyed by `device_id`
+  alone and the worker's app-specific bits (`get_app_memory` package, `get_test_details`
+  → `/api/test/status`) are vcat-d. vcat-ai live monitoring (Connect / Run Config on the
+  vcat-ai tab) is not built yet — pending the vcat-ai HTTP-API + concurrency decisions.
 - **Temperature graph is on the log-file views only** — the vcat-d **live** worker does not
   yet collect battery temp or system thermal, so the live tab has no temperature chart.
+- **`getDeviceRootFolder` / `/api/device/root_folder`** (the vcat-d broadcast path) are now
+  unused for listings (superseded by the scan) — left in place, safe to remove.
 - **`transform.inference_cpu_time`** older logs stored tiny values (non-ns); newer logs use
   ns. Missing/unparseable values render as 0.

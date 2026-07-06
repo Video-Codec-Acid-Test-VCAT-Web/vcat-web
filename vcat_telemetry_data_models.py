@@ -371,6 +371,9 @@ class SessionInfo:
     vcat_version: str = ""
     battery: SessionBatteryInfo = field(default_factory=SessionBatteryInfo)
     start_time: StartTime = field(default_factory=StartTime)
+    # Raw "test" object from the log header. vcat-ai's is a rich nested structure
+    # (name/id/createdAt/testCases[...]); vcat-d has none.
+    test: dict = field(default_factory=dict)
 
     @staticmethod
     def from_dict(d: dict) -> "SessionInfo":
@@ -379,6 +382,7 @@ class SessionInfo:
             vcat_version=d.get("vcat_version", ""),
             battery=SessionBatteryInfo.from_dict(d.get("battery", {})),
             start_time=StartTime.from_dict(d.get("start_time", {})),
+            test=d.get("test", {}) or {},
         )
 
     def to_dict(self) -> dict:
@@ -394,7 +398,8 @@ class SessionInfo:
                 "unix_time_ms": self.start_time.unix_time_ms,
                 "local_date": self.start_time.local_date,
                 "local_time": self.start_time.local_time,
-            }
+            },
+            "test": self.test,
         }
 
 

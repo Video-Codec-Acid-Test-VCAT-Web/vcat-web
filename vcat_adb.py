@@ -349,6 +349,57 @@ def get_device_root_folder(session_id: str, device_id: str) -> Optional[str]:
         return None
 
 
+def scan_vcat_data_folders(session_id: str, device_id: str) -> dict:
+    """
+    Locate each VCAT app's data folder by scanning /sdcard for a `test_results`
+    subfolder containing that app's log files (vcatd_log_* / vcatai_log_*).
+
+    Works WITHOUT the app running (no broadcast needed), so non-live log viewing
+    doesn't require vcat-d/vcat-ai to be launched. Returns e.g.:
+        {"vcat_d": {"root": "...", "test_results": ".../test_results"},
+         "vcat_ai": {"root": "...", "test_results": ".../test_results"}}
+    """
+    # find can exit non-zero on permission-denied dirs; don't use check=True.
+    find = subprocess.run(
+        ["adb", "-s", device_id, "shell",
+         "find /sdcard -maxdepth 6 -type d -name test_results 2>/dev/null"],
+        capture_output=True, text=True,
+    )
+
+    # Candidate test_results dirs: scan results first, then known defaults (covers
+    # devices where find is unavailable/limited, or the folder is the default).
+    candidates, seen = [], set()
+    for line in find.stdout.splitlines():
+        d = line.strip()
+        if d and d not in seen:
+            seen.add(d)
+            candidates.append(d)
+    for default_root in ("/sdcard/vcat-d", "/sdcard/vcat-ai"):
+        d = f"{default_root}/test_results"
+        if d not in seen:
+            seen.add(d)
+            candidates.append(d)
+
+    result: Dict[str, dict] = {}
+    for tr in candidates:
+        listing = subprocess.run(
+            ["adb", "-s", device_id, "shell", f"ls '{tr}' 2>/dev/null"],
+            capture_output=True, text=True,
+        ).stdout
+        names = [n.strip() for n in listing.splitlines() if n.strip()]
+        root = tr.rsplit("/", 1)[0]
+
+        if "vcat_d" not in result and any(
+            n.startswith("vcatd_log_") or n.startswith("logs_") for n in names
+        ):
+            result["vcat_d"] = {"root": root, "test_results": tr}
+        if "vcat_ai" not in result and any(n.startswith("vcatai_log_") for n in names):
+            result["vcat_ai"] = {"root": root, "test_results": tr}
+
+    logger.info(f"[scan] {device_id} vcat folders: {result}")
+    return result
+
+
 def list_installed_packages(session_id: str, device_id: str) -> set:
     """Returns the set of package names installed on the device (via `pm list packages`)."""
     cmd = ["adb", "-s", device_id, "shell", "pm", "list", "packages"]

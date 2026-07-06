@@ -17,3 +17,6 @@ static/.DS_Store
 
 static/.idea/
 .idea/
+
+# analysis / design notes (local only)
+analysis/
