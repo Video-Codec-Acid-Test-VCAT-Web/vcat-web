@@ -137,9 +137,9 @@ async function handleAiLaunchClick() {
 let aiLivePoll = null;
 const AI_LIVE_TAB = "ai-live";
 
-// Newest vcatai_log_*.csv (the file being written) in the vcat-ai test_results folder.
-async function getActiveAiLog(deviceId) {
-  const root = await getAppRoot(deviceId, "vcat_ai");
+// Newest log file (the one being written) in an app's test_results folder.
+async function getActiveLog(deviceId, appId) {
+  const root = await getAppRoot(deviceId, appId);
   if (!root) return null;
   try {
     const path = `${root}/test_results/*.csv`;
@@ -150,7 +150,7 @@ async function getActiveAiLog(deviceId) {
     const files = await res.json(); // backend sorts newest-first
     return files.length ? files[0].path : null;
   } catch (err) {
-    console.error("getActiveAiLog failed:", err);
+    console.error("getActiveLog failed:", err);
     return null;
   }
 }
@@ -233,20 +233,16 @@ async function handleAiConnectClick() {
   showAiTab(tabId);
 
   const poll = async () => {
-    // System telemetry from the ADB worker (per-core CPU the app can't self-report).
+    // Worker telemetry: per-core CPU (ADB) — the app can't self-report it.
+    let workerTel = null;
     try {
       const sys = await (await fetch(`${API_TELEMETRY}?session=${session_token}&device=${deviceId}`)).json();
-      const t = sys.telemetry_data;
-      if (t) {
-        updateCpuChart(t, tabId);
-        updateFreqChart(t, tabId);
-        updateMemoryChart(t, tabId);
-        updateBatteryChart(t, tabId);
-      }
+      workerTel = sys.telemetry_data || null;
     } catch (err) { /* keep polling */ }
 
-    // AI processing time + temperature + test info from the (growing) log file.
-    const activeLog = await getActiveAiLog(deviceId);
+    // Log file: total CPU + CPU freq, memory, battery, temperature, AI proc
+    // time, and test info (full history, so timelines match).
+    const activeLog = await getActiveLog(deviceId, "vcat_ai");
     if (activeLog) {
       try {
         const lg = await (await fetch(
@@ -254,6 +250,10 @@ async function handleAiConnectClick() {
         )).json();
         const lt = lg.telemetry_data;
         if (lt) {
+          updateMixedCpuChart(lt, workerTel, tabId); // total (log) + per-core (worker)
+          updateFreqChart(lt, tabId);
+          updateMemoryChart(lt, tabId);
+          updateBatteryChart(lt, tabId);
           updateTempChart(lt, tabId);
           updateAiProcChart(lt, tabId);
         }
@@ -786,6 +786,65 @@ function updateBatteryChart(telemetry, tabId) {
 }
 
 
+// Live CPU chart: Total CPU from the log (full test history) + per-core from the
+// ADB worker (starts at connect). Per-core samples are shifted onto the log's
+// timeline (offset = latest-log-elapsed − latest-worker-elapsed) so they align.
+function updateMixedCpuChart(logTel, workerTel, tabId) {
+  const canvasId = `${tabId}-cpuChart`;
+  const canvas = document.getElementById(canvasId);
+  if (!canvas) return;
+
+  const logCpu = (logTel && logTel.cpu_usage) || [];
+  const wCpu = (workerTel && workerTel.cpu_usage) || [];
+  if (!logCpu.length && !wCpu.length) return;
+
+  const datasets = [];
+
+  if (logCpu.length) {
+    datasets.push({
+      label: "Total CPU (%)",
+      data: logCpu.map(p => ({ x: p.elapsed_time, y: p.cpu ?? null })),
+      borderColor: COLORS[0], backgroundColor: COLORS[0],
+      borderWidth: 2, tension: 0.1, pointRadius: 0,
+    });
+  }
+
+  const lastW = wCpu.at(-1);
+  if (lastW) {
+    const logMax = logCpu.length ? logCpu.at(-1).elapsed_time : 0;
+    const offset = logMax - wCpu.at(-1).elapsed_time; // align newest samples
+    const coreKeys = Object.keys(lastW).filter(k => k.startsWith("cpu") && k !== "cpu");
+    coreKeys.forEach((key, i) => {
+      datasets.push({
+        label: key,
+        data: wCpu.map(p => ({ x: offset + p.elapsed_time, y: p[key] ?? null })),
+        borderColor: COLORS[(i + 1) % COLORS.length],
+        backgroundColor: COLORS[(i + 1) % COLORS.length],
+        borderWidth: 2, tension: 0.1, pointRadius: 0,
+      });
+    });
+  }
+
+  const latestTime = logCpu.length ? logCpu.at(-1).elapsed_time : 0;
+  const stepSize = computeStepSize(latestTime);
+
+  chartsByTabId[tabId] ||= {};
+  let ref = chartsByTabId[tabId].cpuChart;
+  if (!ref) {
+    ref = new Chart(canvas.getContext("2d"), {
+      type: "line",
+      data: { datasets },
+      options: chartOptions("CPU Usage (%)", latestTime, stepSize),
+    });
+  } else {
+    ref.data.datasets = datasets;
+    ref.options.scales.x.max = latestTime + 60;
+    ref.options.scales.x.ticks.stepSize = stepSize;
+    ref.update();
+  }
+  chartsByTabId[tabId].cpuChart = ref;
+}
+
 function updateCpuChart(telemetry, tabId) {
   const cpu = telemetry.cpu_usage || [];
   const labels = cpu.map(p => p.elapsed_time);
@@ -958,28 +1017,40 @@ function formatDate(iso) {
 }
 
 
-function fetchAndUpdateTelemetry() {
-    fetch(`${API_TELEMETRY}?session=${session_token}&device=${selectedDevice}`)
-    .then(res => res.json())
-    .then(result => {
+async function fetchAndUpdateTelemetry() {
+  const tabId = "telemetry";
 
-      const telemetry = result.telemetry_data;
-      const testDetails = result.test_details;
+  // Worker telemetry: per-core CPU (ADB) + test details.
+  let workerTel = null;
+  try {
+    const result = await (await fetch(
+      `${API_TELEMETRY}?session=${session_token}&device=${selectedDevice}`
+    )).json();
+    workerTel = result.telemetry_data || null;
+    if (result.test_details) updateTestDetailsUI({ test_details: result.test_details }, tabId);
+  } catch (err) {
+    console.error('❌ Telemetry fetch failed:', err);
+  }
 
-      const tabId = "telemetry";
-
-      if (testDetails) {
-          updateTestDetailsUI({ test_details: testDetails }, tabId);
+  // Log file: total CPU + CPU freq, memory, battery, frame drops (full history).
+  try {
+    const activeLog = await getActiveLog(selectedDevice, "vcat_d");
+    if (activeLog) {
+      const lg = await (await fetch(
+        `/api/vcat_monitor/telemetry_from_file?session=${session_token}&device=${selectedDevice}&app=vcat_d&telemetry_file_path=${encodeURIComponent(activeLog)}`
+      )).json();
+      const lt = lg.telemetry_data;
+      if (lt) {
+        updateMixedCpuChart(lt, workerTel, tabId); // total (log) + per-core (worker)
+        updateFreqChart(lt, tabId);
+        updateMemoryChart(lt, tabId);
+        updateBatteryChart(lt, tabId);
+        updateFrameDropChart(lt, tabId);
       }
-
-      updateCpuChart(telemetry, `${tabId}`, tabId);
-      updateBatteryChart(telemetry, `${tabId}`, tabId);
-      updateFreqChart(telemetry, `${tabId}`, tabId);
-      updateMemoryChart(telemetry, `${tabId}`, tabId);
-      updateFrameDropChart(telemetry, `${tabId}`, tabId);
-
-    })
-    .catch(err => console.error('❌ Telemetry fetch failed:', err));
+    }
+  } catch (err) {
+    console.error('❌ Log read failed:', err);
+  }
 }
 
 function chartOptions(yLabel, latestTime, stepSize) {

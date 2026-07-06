@@ -423,55 +423,6 @@ def get_thermal_status(device_id: str, elapsed_time: float) -> Optional[ThermalS
         return None
 
 
-def get_frame_drops(session_id, device_id: str) -> list[FramedropEntry]:
-    if device_id not in telemetry_dataset:
-        logger.warn(f"Unknown device: {device_id}")
-        return []
-
-    telemetry = telemetry_dataset[device_id]
-    last_time = (
-        telemetry.frame_drops[-1].elapsed_time if telemetry.frame_drops else -1.0
-    )
-
-    ipAddr = telemetry.device_ipaddr
-
-    if not ipAddr:
-        logger.error(f"[Could not determine IP or port")
-        return []
-
-    # Call the telemetry endpoint
-    ip_addr = telemetry.device_ipaddr
-    response: Response = vcat_http_proxy.get_device_http_response(
-        session_id, device_id, ip_addr, "/api/telemetry/framedrops"
-    )
-
-    if not response or response.status_code != 200:
-        logger.error(f"Failed to fetch frame drops for {device_id}")
-        return []
-
-    try:
-        json_data = response.get_json()
-        new_entries = []
-
-        for entry in json_data.get("framedrops", []):
-            elapsed = entry.get("elapsed_time")
-            drops = entry.get("framedrops")
-            if elapsed is not None and drops is not None and elapsed > last_time:
-                new_entries.append(
-                    FramedropEntry(elapsed_time=elapsed, delta_framedrops=drops)
-                )
-
-        return new_entries
-
-    except Exception as e:
-        logger.error(f"Parsing frame drop data failed: {e}")
-        return []
-
-
-def get_framedrop_stats(device_id):
-    return random.randint(0, 10)
-
-
 def get_test_details(session_id, device_id: str) -> TestDetails:
 
     if device_id not in telemetry_dataset:
@@ -616,13 +567,8 @@ def telemetry_worker():
             total_kb, used_kb = vcat_adb.get_system_memory(device_id)
             app_kb = vcat_adb.get_app_memory(device_id, _package_for_app(telemetry_data.app))
 
-            # vcat-ai has no frame drops; vcat-d collects them only while testing.
-            if test_running and telemetry_data.app != "vcat_ai":
-                frame_drops = get_frame_drops(
-                    telemetry_data.owner_session_id, device_id
-                )
-            else:
-                frame_drops = None
+            # Frame drops are no longer collected here — they're read from the
+            # active log file (video.frames_dropped) by the client, same as vcat-ai.
 
             if telemetry_data.cpu_usage:
                 prev_raw_data = telemetry_data.cpu_usage[-1].raw_stats
@@ -685,18 +631,6 @@ def telemetry_worker():
                     ]
                     append_telemetry(
                         telemetry_data.owner_session_id, TelemetrySheet.MEMORY, [row]
-                    )
-
-                if frame_drops is not None:
-                    telemetry_data.frame_drops.extend(frame_drops)
-                    rows = [
-                        [entry.elapsed_time, entry.delta_framedrops]
-                        for entry in frame_drops
-                    ]
-                    append_telemetry(
-                        telemetry_data.owner_session_id,
-                        TelemetrySheet.FRAME_DROPS,
-                        rows,
                     )
 
                 if cur_cpu_usage is not None:
@@ -852,19 +786,6 @@ def resetTelemetry(session_id, device_id, app: str = "vcat_d"):
     # ✅ Reset telemetry for the given device
     with session_thread_lock:
         telemetry_dataset[device_id] = telemetry_data
-
-        # vcat-ai has no frame drops (and no such endpoint) — skip the reset.
-        if app != "vcat_ai":
-            response = vcat_http_proxy.get_device_http_response(
-                session_id, device_id, ipAddr, "/api/telemetry/reset_framedrops"
-            )
-
-            if not response or response.status_code != 200:
-                logger.error(
-                    f"[{device_id}] Failed to reset frame drops (HTTP {response.status_code if response else 'No Response'})"
-                )
-            else:
-                logger.debug(f"[{device_id}] Frame drops reset successfully")
 
     # ✅ Log the telemetry reset event
     vcat_adb.log_console_entry(

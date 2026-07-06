@@ -10,8 +10,9 @@ both apps; and (D) **non-live UX** — filesystem folder scan (view logs without
 running), Launch controls + app-running gating, device-info refresh after launch,
 scrollable vcat-ai Test Details, Grid/Focus view modes, and logo/background theming; and
 (E) **vcat-ai live monitoring** — hybrid ADB-worker + log-file live session, mutually
-exclusive with vcat-d.
-(A/B → `4fa2a5b`; C → `237b96a`; D → `61898ff`; E is the current change.)
+exclusive with vcat-d; and (F) **live charts read from the log file** for both apps
+(frame-drops API removed; mixed CPU chart = log total + polled per-core).
+(A/B → `4fa2a5b`; C → `237b96a`; D → `61898ff`; E → `038ea4a`; F is the current change.)
 
 ---
 
@@ -218,16 +219,35 @@ AI processing-time + temperature + test info.
 - Reader now reads `transform.inference_cpu_time_ns` (the column gained an `_ns` suffix;
   older `transform.inference_cpu_time` kept as fallback) — Inference CPU was reading 0.
 
+## F. Live charts read from the log file (both apps)
+
+The `/api/telemetry/framedrops` API model is removed — live per-frame/system data now
+comes from the log (the app's source of truth), matching the file-open views.
+
+### Backend
+- Removed `get_frame_drops()` (+ dead `get_framedrop_stats()`), the worker's frame-drop
+  collection, and `resetTelemetry`'s `/api/telemetry/reset_framedrops` call.
+
+### Frontend
+- Both live loops now render **CPU freq, memory, battery, frame drops (vcat-d) /
+  temperature + AI proc time + test info (vcat-ai)** from the active log file (full test
+  history, so all timelines match). The worker poll just keeps the session alive
+  (reserved for GPU/NPU).
+- **Mixed CPU chart** (`updateMixedCpuChart`): Total CPU from the log (full history) +
+  per-core from the ADB worker (starts at connect), with per-core shifted onto the log's
+  timeline (`offset = latest-log-elapsed − latest-worker-elapsed`) so they align. Used by
+  both live tabs; file-open views keep `updateCpuChart`.
+- `getActiveAiLog` generalized to `getActiveLog(deviceId, appId)`.
+
 ## ⚠️ Notes before pushing
 
 - **Debug timing values** are currently in place and should likely be reverted:
   - `vcat_config.py`: `DEVICE_POLL_INITIAL` and `DEVICE_POLL_STEADY` set to `2` (were
     10/30), `TELEMETRY_LOOP_POLL_INTERVAL` set to `2` (was 10).
   - `vcat_telemetry.py`: `console_cleanup_loop()` sleep set to `2s` (was 60s).
-- **vcat-ai live is a v1.** The live poll re-pulls the full log each cycle (simple; could
-  tail incrementally); system charts use monitor-start elapsed while the AI/temp charts use
-  the log's test-start elapsed, so their x-axes may not perfectly align. Run Config on the
-  vcat-ai tab is still unwired (needs a vcat-ai HTTP endpoint).
+- **Live is a v1.** Each poll re-pulls the full log (simple; could tail incrementally).
+  Run Config on the vcat-ai tab is still unwired (needs a vcat-ai HTTP endpoint). The live
+  Excel export no longer accumulates frame drops from the worker (they live in the log).
 - **Inference CPU (~1 s) dwarfs Inference (~0.24 s)** on the shared AI Processing Time
   chart's scale — may want a secondary axis / separate chart.
 - **Temperature graph is on the log-file views (and vcat-ai live) only** — the vcat-d
