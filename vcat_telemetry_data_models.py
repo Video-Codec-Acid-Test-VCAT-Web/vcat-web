@@ -426,6 +426,7 @@ class VcatdTelemetryData:
     npu_usage: List[CpuUsageEntry] = field(default_factory=list)
     gpu_frame_stats: List[GpuFrameStatsEntry] = field(default_factory=list)
     thermal_status: List[ThermalStatus] = field(default_factory=list)
+    app: str = "vcat_d"  # which VCAT app this live session monitors
 
 def make_empty_telemetry_data() -> VcatdTelemetryData:
     obj = object.__new__(VcatdTelemetryData)
@@ -454,6 +455,7 @@ def make_empty_telemetry_data() -> VcatdTelemetryData:
     obj.npu_usage = []
     obj.gpu_frame_stats = []
     obj.thermal_status = []
+    obj.app = "vcat_d"
 
     return obj
 

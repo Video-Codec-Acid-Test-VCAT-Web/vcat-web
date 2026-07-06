@@ -573,7 +573,12 @@ def telemetry_worker():
                     session_last_access.pop(device_id, None)
                 continue  # Skip to next device
 
-            test_details = get_test_details(telemetry_data.owner_session_id, device_id)
+            if telemetry_data.app == "vcat_ai":
+                # vcat-ai test info comes from the log file (polled by the client),
+                # not an HTTP status endpoint — skip the (nonexistent) /api/test/status.
+                test_details = TestDetails()
+            else:
+                test_details = get_test_details(telemetry_data.owner_session_id, device_id)
             telemetry_data.test_details = test_details
 
             poll_when_not_testing = (
@@ -591,7 +596,7 @@ def telemetry_worker():
                 logger.debug(
                     f"[Monitor] Device {device_id} test active.  Resetting pre-test telemetry"
                 )
-                resetTelemetry(telemetry_data.owner_session_id, device_id)
+                resetTelemetry(telemetry_data.owner_session_id, device_id, app=telemetry_data.app)
 
             session_state[telemetry_data.owner_session_id] = test_running
 
@@ -609,9 +614,10 @@ def telemetry_worker():
             battery = vcat_adb.get_battery_level(device_id)
             elapsed = time.time() - telemetry_data.start_time
             total_kb, used_kb = vcat_adb.get_system_memory(device_id)
-            app_kb = vcat_adb.get_app_memory(device_id)
+            app_kb = vcat_adb.get_app_memory(device_id, _package_for_app(telemetry_data.app))
 
-            if test_running:
+            # vcat-ai has no frame drops; vcat-d collects them only while testing.
+            if test_running and telemetry_data.app != "vcat_ai":
                 frame_drops = get_frame_drops(
                     telemetry_data.owner_session_id, device_id
                 )
@@ -806,8 +812,11 @@ def console_cleanup_loop():
         time.sleep(2)
 
 
-def resetTelemetry(session_id, device_id):
-    ipAddr = vcat_adb.get_device_ip_and_port(session_id, device_id) or ""
+def resetTelemetry(session_id, device_id, app: str = "vcat_d"):
+    if app == "vcat_ai":
+        ipAddr = vcat_adb.get_ai_device_ip_and_port(session_id, device_id) or ""
+    else:
+        ipAddr = vcat_adb.get_device_ip_and_port(session_id, device_id) or ""
 
     now = time.time()
 
@@ -835,6 +844,8 @@ def resetTelemetry(session_id, device_id):
         session_info=SessionInfo()
     )
 
+    telemetry_data.app = app
+
     # Reset the vsync cursor for this device so we don't skip frames after reset
     _last_vsync_id.pop(device_id, None)
 
@@ -842,16 +853,18 @@ def resetTelemetry(session_id, device_id):
     with session_thread_lock:
         telemetry_dataset[device_id] = telemetry_data
 
-        response = vcat_http_proxy.get_device_http_response(
-            session_id, device_id, ipAddr, "/api/telemetry/reset_framedrops"
-        )
-
-        if not response or response.status_code != 200:
-            logger.error(
-                f"[{device_id}] Failed to reset frame drops (HTTP {response.status_code if response else 'No Response'})"
+        # vcat-ai has no frame drops (and no such endpoint) — skip the reset.
+        if app != "vcat_ai":
+            response = vcat_http_proxy.get_device_http_response(
+                session_id, device_id, ipAddr, "/api/telemetry/reset_framedrops"
             )
-        else:
-            logger.debug(f"[{device_id}] Frame drops reset successfully")
+
+            if not response or response.status_code != 200:
+                logger.error(
+                    f"[{device_id}] Failed to reset frame drops (HTTP {response.status_code if response else 'No Response'})"
+                )
+            else:
+                logger.debug(f"[{device_id}] Frame drops reset successfully")
 
     # ✅ Log the telemetry reset event
     vcat_adb.log_console_entry(
@@ -1958,24 +1971,32 @@ def api_telemetry(session_id, device_id):
 @require_valid_session_and_device
 def api_start_device_monitor(session_id, device_id):
 
-    if device_id in telemetry_dataset:
-        return jsonify({"status": "already_monitored"}), 200
+    app = request.args.get("app", "vcat_d")
+    package = _package_for_app(app)
 
-    if not is_vcat_running(session_id, device_id):
-        launched, already_running = launch_vcat(session_id, device_id)
+    existing = telemetry_dataset.get(device_id)
+    if existing is not None:
+        if getattr(existing, "app", "vcat_d") == app:
+            return jsonify({"status": "already_monitored", "app": app}), 200
+        # A different app is monitored on this device — switch to the requested one.
+        with session_thread_lock:
+            telemetry_dataset.pop(device_id, None)
+            session_last_access.pop(device_id, None)
+
+    # vcat-d and vcat-ai can't run together — stop the other before launching.
+    other_package = _package_for_app("vcat_d" if app == "vcat_ai" else "vcat_ai")
+    vcat_adb.run_adb_command_with_log(
+        session_id, device_id,
+        ["adb", "-s", device_id, "shell", "am", "force-stop", other_package],
+    )
+
+    if not is_vcat_running(session_id, device_id, package):
+        launched, already_running = launch_vcat(session_id, device_id, package)
         if not launched and not already_running:
-            logger.error("Unable to launch VCAT")
+            logger.error(f"Unable to launch {package}")
         time.sleep(0.5)
 
-    ip_addr = ""
-
-    # Step 1: Find device IP address
-#    try:
-#        ip_addr = get_required_ip_and_port(session_id, device_id)
-#    except ValueError as e:
-#        return jsonify({"error": str(e)}), 404
-
-    device_info, error_response = get_device_info(session_id, device_id)
+    device_info, error_response = get_device_info(session_id, device_id, refresh=True)
     if error_response:
         return error_response
 
@@ -1984,7 +2005,7 @@ def api_start_device_monitor(session_id, device_id):
 
     time.sleep(0.5)
 
-    telemetry_data = resetTelemetry(session_id, device_id)
+    telemetry_data = resetTelemetry(session_id, device_id, app=app)
     telemetry_data.device_info = device_info
 
     touch_session_access(session_id, device_id)
@@ -1996,7 +2017,7 @@ def api_start_device_monitor(session_id, device_id):
         vcat_adb.console_thread = threading.Thread(target=telemetry_worker, daemon=True)
         vcat_adb.console_thread.start()
 
-    return jsonify({"status": "monitoring_started", "device_id": device_id}), 200
+    return jsonify({"status": "monitoring_started", "device_id": device_id, "app": app}), 200
 
 
 @app.route("/api/vcat_monitor/connected", methods=["GET"])
@@ -2008,6 +2029,7 @@ def api_is_connected(session_id, device_id):
             jsonify(
                 {
                     "monitored": True,
+                    "app": getattr(telemetry_dataset[device_id], "app", "vcat_d"),
                     "status": f"device_id '{device_id}' is being monitored by session_id '{session_id}'",
                 }
             ),

@@ -8,8 +8,10 @@ via a far-left app-tab UI, and no longer relies on a fixed on-device data folder
 with vcat-ai-specific data model, AI processing-time series, and a temperature graph on
 both apps; and (D) **non-live UX** — filesystem folder scan (view logs without the app
 running), Launch controls + app-running gating, device-info refresh after launch,
-scrollable vcat-ai Test Details, Grid/Focus view modes, and logo/background theming.
-(A/B → `4fa2a5b`; C → `237b96a`; D is the current change.)
+scrollable vcat-ai Test Details, Grid/Focus view modes, and logo/background theming; and
+(E) **vcat-ai live monitoring** — hybrid ADB-worker + log-file live session, mutually
+exclusive with vcat-d.
+(A/B → `4fa2a5b`; C → `237b96a`; D → `61898ff`; E is the current change.)
 
 ---
 
@@ -186,18 +188,50 @@ scrollable vcat-ai Test Details, Grid/Focus view modes, and logo/background them
   `vcat_ai_logo.png`, transparent so the (transparent-PNG) logos aren't lost; active tab =
   border highlight. Page background uses `background.png` instead of the orange gradient.
 
+## E. vcat-ai live monitoring
+
+The two apps can't run together, so connecting one stops the other. vcat-ai has no
+live-metrics HTTP endpoint, so its live data is a hybrid: **ADB (worker)** for what the
+app can't self-report (per-core CPU, + freq/mem/battery), and the **active log file** for
+AI processing-time + temperature + test info.
+
+### Backend (app-aware monitor)
+- `VcatdTelemetryData.app` tags the live session; `resetTelemetry(..., app=)` uses the
+  app's IP source and skips the frame-drop reset for vcat-ai.
+- `/api/vcat_monitor/start?app=vcat_ai`: **mutual exclusion** — stops any different-app
+  session on the device and `am force-stop`s the other package; launches the right package
+  via `_package_for_app`; refreshes device info.
+- `telemetry_worker` branches on `app`: vcat-ai skips the HTTP test-status call and
+  frame-drops and reads app-memory from `com.roncatech.vcat_ai`.
+- `/api/vcat_monitor/connected` reports the session's `app`.
+
+### Frontend
+- vcat-ai **Connect** → confirm-and-tear-down vcat-d if live → `start?app=vcat_ai` →
+  **Live Session** tab in the vcat-ai panel, polling every 5s:
+  worker telemetry → CPU (per-core) / Freq / Memory / Battery; active log
+  (`telemetry_from_file?app=vcat_ai`, newest `vcatai_log_*.csv`) → Temperature / AI
+  Processing Time / Test Details. **Disconnect** stops the poll + monitor and closes the
+  tab. Symmetric guard when connecting vcat-d while vcat-ai is live
+  (`stopAiLive` / `stopVcatdLive`).
+
+### Fix
+- Reader now reads `transform.inference_cpu_time_ns` (the column gained an `_ns` suffix;
+  older `transform.inference_cpu_time` kept as fallback) — Inference CPU was reading 0.
+
 ## ⚠️ Notes before pushing
 
 - **Debug timing values** are currently in place and should likely be reverted:
   - `vcat_config.py`: `DEVICE_POLL_INITIAL` and `DEVICE_POLL_STEADY` set to `2` (were
     10/30), `TELEMETRY_LOOP_POLL_INTERVAL` set to `2` (was 10).
   - `vcat_telemetry.py`: `console_cleanup_loop()` sleep set to `2s` (was 60s).
-- **Live monitoring is still vcat-d-only.** `telemetry_dataset` is keyed by `device_id`
-  alone and the worker's app-specific bits (`get_app_memory` package, `get_test_details`
-  → `/api/test/status`) are vcat-d. vcat-ai live monitoring (Connect / Run Config on the
-  vcat-ai tab) is not built yet — pending the vcat-ai HTTP-API + concurrency decisions.
-- **Temperature graph is on the log-file views only** — the vcat-d **live** worker does not
-  yet collect battery temp or system thermal, so the live tab has no temperature chart.
+- **vcat-ai live is a v1.** The live poll re-pulls the full log each cycle (simple; could
+  tail incrementally); system charts use monitor-start elapsed while the AI/temp charts use
+  the log's test-start elapsed, so their x-axes may not perfectly align. Run Config on the
+  vcat-ai tab is still unwired (needs a vcat-ai HTTP endpoint).
+- **Inference CPU (~1 s) dwarfs Inference (~0.24 s)** on the shared AI Processing Time
+  chart's scale — may want a secondary axis / separate chart.
+- **Temperature graph is on the log-file views (and vcat-ai live) only** — the vcat-d
+  **live** worker doesn't collect battery temp or system thermal.
 - **`getDeviceRootFolder` / `/api/device/root_folder`** (the vcat-d broadcast path) are now
   unused for listings (superseded by the scan) — left in place, safe to remove.
 - **`transform.inference_cpu_time`** older logs stored tiny values (non-ns); newer logs use

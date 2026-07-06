@@ -327,7 +327,11 @@ def read_ai_telemetry_data(session_id, telemetry_file) -> VcataiTelemetryData:
 
         frame_proc_time.append(_read_proc_time_ns(elapsed_time, row, "transform.frame_proc_time_ns"))
         inf_time_ns.append(_read_proc_time_ns(elapsed_time, row, "transform.inference_time_ns"))
-        inf_cpu_time_ns.append(_read_proc_time_ns(elapsed_time, row, "transform.inference_cpu_time"))
+        # Inference CPU time column gained an "_ns" suffix in newer logs.
+        cpu_key = ("transform.inference_cpu_time_ns"
+                   if "transform.inference_cpu_time_ns" in row
+                   else "transform.inference_cpu_time")
+        inf_cpu_time_ns.append(_read_proc_time_ns(elapsed_time, row, cpu_key))
 
     test_start_time = datetime.fromtimestamp(start_time / 1000.0).isoformat()
 

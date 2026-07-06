@@ -131,6 +131,162 @@ async function handleAiLaunchClick() {
   loadAiDeviceInfo(deviceId);
 }
 
+// ---- vcat-ai live monitoring ----
+// System telemetry (per-core CPU/freq/mem/battery) comes from the ADB worker;
+// AI processing time + temperature + test info come from the active log file.
+let aiLivePoll = null;
+const AI_LIVE_TAB = "ai-live";
+
+// Newest vcatai_log_*.csv (the file being written) in the vcat-ai test_results folder.
+async function getActiveAiLog(deviceId) {
+  const root = await getAppRoot(deviceId, "vcat_ai");
+  if (!root) return null;
+  try {
+    const path = `${root}/test_results/*.csv`;
+    const res = await fetch(
+      `/api/device/test_results_files?session=${session_token}&device=${deviceId}&path=${encodeURIComponent(path)}`
+    );
+    if (!res.ok) return null;
+    const files = await res.json(); // backend sorts newest-first
+    return files.length ? files[0].path : null;
+  } catch (err) {
+    console.error("getActiveAiLog failed:", err);
+    return null;
+  }
+}
+
+// Tear down the vcat-ai live UI (poll loop + tab + connect button).
+function stopAiLive() {
+  if (aiLivePoll) { clearInterval(aiLivePoll); aiLivePoll = null; }
+  document.getElementById(`${AI_LIVE_TAB}-tab-btn`)?.remove();
+  document.getElementById(`${AI_LIVE_TAB}-tab`)?.remove();
+  if (chartsByTabId[AI_LIVE_TAB]) delete chartsByTabId[AI_LIVE_TAB];
+  setAiConnectState(false);
+}
+
+// Tear down the vcat-d live UI (poll loop + live tab + connect button).
+function stopVcatdLive() {
+  if (window.telemetryInterval) { clearInterval(window.telemetryInterval); window.telemetryInterval = null; }
+  document.getElementById("telemetry-tab-btn")?.remove();
+  document.getElementById("telemetry-tab")?.remove();
+  if (chartsByTabId["telemetry"]) delete chartsByTabId["telemetry"];
+  const btn = document.getElementById("connect-btn");
+  if (btn) {
+    btn.src = "/static/btn_connect_device.png";
+    btn.title = "Connect (Go Live)";
+    btn.onclick = () => handleConnectClick("Live");
+  }
+}
+
+function setAiConnectState(connected) {
+  const btn = document.getElementById("ai-connect-btn");
+  if (!btn) return;
+  if (connected) {
+    btn.src = "/static/btn_disconnect_device.png";
+    btn.title = "Disconnect";
+    btn.onclick = handleAiDisconnectClick;
+  } else {
+    btn.src = "/static/btn_connect_device.png";
+    btn.title = "Connect (Go Live)";
+    btn.onclick = handleAiConnectClick;
+  }
+}
+
+async function handleAiConnectClick() {
+  const deviceId = document.getElementById("device")?.value;
+  if (!deviceId) return;
+
+  // Mutual exclusion: if vcat-d is live, confirm, then tear down its live UI.
+  if (window.telemetryInterval) {
+    if (!confirm("vcat-d is connected. Disconnect it and connect vcat-ai?")) return;
+    stopVcatdLive();
+  }
+
+  try {
+    await fetch(
+      `/api/vcat_monitor/start?session=${session_token}&device=${deviceId}&app=vcat_ai`,
+      { method: "POST" }
+    );
+  } catch (err) {
+    console.error("vcat-ai connect failed:", err);
+    return;
+  }
+
+  // Live tab in the vcat-ai panel (charts minus frame drops, plus AI/temp).
+  const tabId = AI_LIVE_TAB;
+  if (!document.getElementById(`${tabId}-tab-btn`)) {
+    const header = document.getElementById("ai-tab-header");
+    const btn = document.createElement("button");
+    btn.id = `${tabId}-tab-btn`;
+    btn.className = "ai-tab-btn";
+    btn.textContent = "Live Session";
+    btn.onclick = () => showAiTab(tabId);
+    header.appendChild(btn);
+
+    const pane = document.createElement("div");
+    pane.id = `${tabId}-tab`;
+    pane.className = "ai-tab-pane";
+    pane.style.display = "none";
+    document.getElementById("ai-tab-content").appendChild(pane);
+    setupAiTelemetryCanvas(tabId);
+  }
+  showAiTab(tabId);
+
+  const poll = async () => {
+    // System telemetry from the ADB worker (per-core CPU the app can't self-report).
+    try {
+      const sys = await (await fetch(`${API_TELEMETRY}?session=${session_token}&device=${deviceId}`)).json();
+      const t = sys.telemetry_data;
+      if (t) {
+        updateCpuChart(t, tabId);
+        updateFreqChart(t, tabId);
+        updateMemoryChart(t, tabId);
+        updateBatteryChart(t, tabId);
+      }
+    } catch (err) { /* keep polling */ }
+
+    // AI processing time + temperature + test info from the (growing) log file.
+    const activeLog = await getActiveAiLog(deviceId);
+    if (activeLog) {
+      try {
+        const lg = await (await fetch(
+          `/api/vcat_monitor/telemetry_from_file?session=${session_token}&device=${deviceId}&app=vcat_ai&telemetry_file_path=${encodeURIComponent(activeLog)}`
+        )).json();
+        const lt = lg.telemetry_data;
+        if (lt) {
+          updateTempChart(lt, tabId);
+          updateAiProcChart(lt, tabId);
+        }
+        renderAiTestDetails(document.getElementById(`${tabId}-ai-test-details`), lg.ai_test);
+      } catch (err) { /* keep polling */ }
+    }
+  };
+
+  poll();
+  if (aiLivePoll) clearInterval(aiLivePoll);
+  aiLivePoll = setInterval(poll, 5000);
+
+  setAiConnectState(true);
+  updateAiToolbar(deviceId);
+}
+
+async function handleAiDisconnectClick() {
+  const deviceId = document.getElementById("device")?.value;
+  if (aiLivePoll) { clearInterval(aiLivePoll); aiLivePoll = null; }
+
+  try {
+    await fetch(`/api/vcat_monitor/stop?session=${session_token}&device=${deviceId}`, { method: "POST" });
+  } catch (err) { /* ignore */ }
+
+  document.getElementById(`${AI_LIVE_TAB}-tab-btn`)?.remove();
+  document.getElementById(`${AI_LIVE_TAB}-tab`)?.remove();
+  if (chartsByTabId[AI_LIVE_TAB]) delete chartsByTabId[AI_LIVE_TAB];
+  showAiTab("ai-device");
+
+  setAiConnectState(false);
+  updateAiToolbar(deviceId);
+}
+
 async function setDeviceConnectionState() {
   const deviceId = selectedDevice;
   const sessionId = session_token;
@@ -187,6 +343,12 @@ function handleConnectClick(source) {
   const deviceId = document.getElementById("device").value;
   if (!deviceId) return alert("Select a device first.");
   selectedDevice = deviceId;
+
+  // Mutual exclusion: going live on vcat-d while vcat-ai is live → confirm + tear down.
+  if (isLive && aiLivePoll) {
+    if (!confirm("vcat-ai is connected. Disconnect it and connect vcat-d?")) return;
+    stopAiLive();
+  }
 
   // Safe tab ID generation
   let tabId, tabLabel;
