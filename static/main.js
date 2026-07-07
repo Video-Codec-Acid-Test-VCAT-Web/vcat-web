@@ -183,12 +183,14 @@ async function saveLiveSession() {
     const data = await res.json();
     if (data.status === "saved") {
       alert(`Saved session: ${data.name}`);
-    } else {
-      alert(`Save failed: ${data.message || "error"}`);
+      return true;
     }
+    alert(`Save failed: ${data.message || "error"}`);
+    return false;
   } catch (err) {
     console.error("Save session failed:", err);
     alert("Save failed.");
+    return false;
   }
 }
 
@@ -1390,6 +1392,27 @@ function closeResetModal() {
 function confirmResetTelemetry() {
   resetTelemetry();
   closeResetModal();
+}
+
+// Stop + tear down whichever live session is active (vcat-ai or vcat-d).
+function stopCurrentLiveSession() {
+  const deviceId = document.getElementById("device")?.value;
+  if (aiLivePoll) {
+    handleAiDisconnectClick();
+  } else if (window.telemetryInterval) {
+    if (deviceId) {
+      fetch(`${API_BASE}/api/vcat_monitor/stop?session=${session_token}&device=${deviceId}`, { method: "POST" })
+        .catch(() => {});
+    }
+    stopVcatdLive();
+  }
+}
+
+// Reset = close the live session; optionally snapshot it first.
+async function confirmReset(save) {
+  closeResetModal();
+  if (save && !(await saveLiveSession())) return; // don't close if the save failed
+  stopCurrentLiveSession();
 }
 
 function resetTestStatus() {

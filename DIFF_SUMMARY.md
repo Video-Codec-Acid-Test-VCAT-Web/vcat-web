@@ -267,6 +267,11 @@ and reopen any session CSV later — no device required.
   device-optional / `saved`-aware.
 - `updateSnapshotButtons()` enables **Save** and **Reset** only while a live session is
   active; **Load** is always enabled.
+- **Reset Telemetry** now closes the live session. Its (previously empty) modal is filled
+  and centered with three choices: **Cancel**, **Reset** (close the session), and
+  **Save & Reset** (snapshot to Downloads first, then close — only closes if the save
+  succeeded). `stopCurrentLiveSession()` tears down vcat-ai (`handleAiDisconnectClick`) or
+  vcat-d (`/stop` + `stopVcatdLive`).
 
 ## ⚠️ Notes before pushing
 
