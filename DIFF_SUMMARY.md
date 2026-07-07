@@ -11,8 +11,11 @@ running), Launch controls + app-running gating, device-info refresh after launch
 scrollable vcat-ai Test Details, Grid/Focus view modes, and logo/background theming; and
 (E) **vcat-ai live monitoring** — hybrid ADB-worker + log-file live session, mutually
 exclusive with vcat-d; and (F) **live charts read from the log file** for both apps
-(frame-drops API removed; mixed CPU chart = log total + polled per-core).
-(A/B → `4fa2a5b`; C → `237b96a`; D → `61898ff`; E → `038ea4a`; F is the current change.)
+(frame-drops API removed; mixed CPU chart = log total + polled per-core); and
+(G) **save/load session snapshots** — snapshot a live session to a CSV (with per-core CPU)
+and reopen any session CSV without a device.
+(A/B → `4fa2a5b`; C → `237b96a`; D → `61898ff`; E → `038ea4a`; F → `233d5d3`;
+G is the current change.)
 
 ---
 
@@ -238,6 +241,32 @@ comes from the log (the app's source of truth), matching the file-open views.
   timeline (`offset = latest-log-elapsed − latest-worker-elapsed`) so they align. Used by
   both live tabs; file-open views keep `updateCpuChart`.
 - `getActiveAiLog` generalized to `getActiveLog(deviceId, appId)`.
+
+## G. Save / load session snapshots
+
+Snapshot a live session to a CSV (the app log + per-core CPU columns the app can't log),
+and reopen any session CSV later — no device required.
+
+### Backend
+- `save_live_session()` + `POST /api/vcat_monitor/save_session`: pulls the active log and
+  injects `cpu.usage.<core>` columns from the live per-core ADB series (nearest sample per
+  log row, aligned by elapsed; pre-connect rows left blank). Non-destructive — the session
+  keeps running. Saves to `~/Downloads/<log>_snap_<ts>.csv`.
+- `POST /api/vcat_monitor/upload_session`: store a browsed CSV so it can be opened.
+- `GET /api/vcat_monitor/load_saved` (**no device**): read a host CSV, infer app from the
+  filename, return telemetry. `telemetry_from_file` also gained `saved=1`.
+- The reader's `cpu.usage.<n>` support round-trips these per-core columns back to `cpu<n>`.
+
+### Frontend
+- Top-level image buttons next to **Device** (peers, boxless): **Save Snapshot**
+  (`btn_save_snapshot.png`) and **Load Snapshot** (`btn_load_snapshot.png`), plus
+  **Reset Telemetry** moved here from the per-tab toolbar.
+- **Load** = browse to a CSV → upload → `loadSavedSession()` reveals the UI (no device
+  needed), `ensureAppTab()` adds the rail tab, and opens the matching app viewer with
+  per-core CPU shown. Save/open paths (`handleConnectClick`, `openAiLogFile`) are now
+  device-optional / `saved`-aware.
+- `updateSnapshotButtons()` enables **Save** and **Reset** only while a live session is
+  active; **Load** is always enabled.
 
 ## ⚠️ Notes before pushing
 

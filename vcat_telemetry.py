@@ -38,6 +38,9 @@ sessions on Android devices via ADB and HTTP.
 
 import argparse
 import atexit
+import bisect
+import csv
+import io
 import json
 import os
 import random
@@ -1740,6 +1743,147 @@ def build_telemetry_response(telemetry, device_id: str) -> dict:
     }
 
 
+def _sessions_dir() -> str:
+    # Saved sessions go in the user's Downloads folder (local desktop tool).
+    d = os.path.expanduser("~/Downloads")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def save_live_session(session_id, device_id, log_device_path) -> str:
+    """
+    Snapshot a live session: pull the active app log and add per-core CPU usage
+    columns (cpu.usage.<core>) from the ADB-collected series. Non-destructive —
+    the live session keeps running. Returns the saved host file path.
+    """
+    telemetry = telemetry_dataset.get(device_id)
+
+    local_log = get_device_file(session_id, device_id, log_device_path, force_temp=True)
+    with open(local_log, "r", encoding="utf-8") as f:
+        lines = f.readlines()
+
+    data_start = next(
+        (i for i, ln in enumerate(lines) if ln.strip().startswith("test.timestamp")),
+        len(lines),
+    )
+    preamble = lines[:data_start]
+    reader = csv.DictReader(io.StringIO("".join(lines[data_start:])))
+    fieldnames = list(reader.fieldnames or [])
+    rows = list(reader)
+
+    # Build per-core samples on the log's timeline and add them to each row.
+    if telemetry and getattr(telemetry, "cpu_usage", None) and rows:
+        first_ts = int(float(rows[0]["test.timestamp"]))
+        log_elapsed = [(int(float(r["test.timestamp"])) - first_ts) / 1000.0 for r in rows]
+
+        worker = telemetry.cpu_usage
+        offset = log_elapsed[-1] - worker[-1].elapsed_time  # align newest samples
+
+        core_keys = sorted(
+            {k for e in worker for k in e.usage_pct if k.startswith("cpu") and k != "cpu"},
+            key=lambda k: int(k[3:]) if k[3:].isdigit() else 0,
+        )
+        col_for = {k: f"cpu.usage.{k[3:]}" for k in core_keys}
+        for col in col_for.values():
+            if col not in fieldnames:
+                fieldnames.append(col)
+
+        sample_times = [offset + e.elapsed_time for e in worker]
+
+        for r, e_row in zip(rows, log_elapsed):
+            if e_row < offset - 1.0:
+                continue  # before connect — no per-core captured
+            idx = bisect.bisect_left(sample_times, e_row)
+            cands = [j for j in (idx - 1, idx) if 0 <= j < len(worker)]
+            if not cands:
+                continue
+            best = min(cands, key=lambda j: abs(sample_times[j] - e_row))
+            for k in core_keys:
+                if k in worker[best].usage_pct:
+                    r[col_for[k]] = worker[best].usage_pct[k]
+
+    base = os.path.splitext(os.path.basename(log_device_path))[0]
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    out_path = os.path.join(_sessions_dir(), f"{base}_snap_{stamp}.csv")
+
+    with open(out_path, "w", encoding="utf-8", newline="") as f:
+        f.writelines(preamble)
+        writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(rows)
+
+    return out_path
+
+
+@app.route("/api/vcat_monitor/save_session", methods=["POST"])
+@require_valid_session_and_device
+def api_save_session(session_id, device_id):
+    log_path = request.args.get("telemetry_file_path")
+    if not log_path or not log_path.startswith("/sdcard/"):
+        return jsonify({"status": "error", "message": "Missing/invalid telemetry_file_path"}), 400
+    try:
+        out_path = save_live_session(session_id, device_id, log_path)
+        return jsonify({"status": "saved", "name": os.path.basename(out_path), "path": out_path})
+    except Exception as e:
+        logger.error(f"save_session failed: {e}")
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+@app.route("/api/vcat_monitor/saved_sessions", methods=["GET"])
+@require_valid_session
+def api_saved_sessions(session_id):
+    d = _sessions_dir()
+    # Only our snapshot files (avoid listing unrelated CSVs in Downloads).
+    files = sorted(
+        (f for f in os.listdir(d) if f.endswith(".csv") and "_snap_" in f),
+        reverse=True,
+    )
+    return jsonify([{"name": f} for f in files])
+
+
+@app.route("/api/vcat_monitor/upload_session", methods=["POST"])
+@require_valid_session
+def api_upload_session(session_id):
+    """Receive a browsed CSV, store it in the sessions dir, return its name so it
+    can be opened via load_saved. No device required."""
+    f = request.files.get("file")
+    if not f or not f.filename:
+        return jsonify({"status": "error", "message": "No file provided"}), 400
+    name = os.path.basename(f.filename)
+    f.save(os.path.join(_sessions_dir(), name))
+    return jsonify({"status": "ok", "name": name})
+
+
+@app.route("/api/vcat_monitor/load_saved", methods=["GET"])
+@require_valid_session
+def api_load_saved(session_id):
+    """
+    Load a saved session (host-side CSV) — no device required. Infers the app
+    from the filename (or the `app` param) and returns the telemetry response.
+    """
+    name = request.args.get("name")
+    if not name:
+        return jsonify({"status": "error", "message": "Missing name"}), 400
+
+    local_path = os.path.join(_sessions_dir(), os.path.basename(name))
+    if not os.path.isfile(local_path):
+        return jsonify({"status": "error", "message": "Saved session not found"}), 404
+
+    app = request.args.get("app") or ("vcat_ai" if "vcatai" in os.path.basename(name) else "vcat_d")
+    try:
+        if app == "vcat_ai":
+            telemetry = read_ai_telemetry_data(session_id, local_path)
+            response = build_ai_telemetry_response(telemetry, "")
+        else:
+            telemetry = read_telemetry_data(session_id, local_path)
+            response = build_telemetry_response(telemetry, "")
+        response["app"] = app
+        return Response(json.dumps(response, indent=2, sort_keys=False), mimetype="application/json")
+    except Exception as e:
+        logger.error(f"load_saved failed: {e}")
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
 @app.route("/api/vcat_monitor/telemetry_from_file", methods=["GET"])
 @require_valid_session_and_device
 def api_telemetry_from_file(session_id, device_id):
@@ -1762,14 +1906,24 @@ def api_telemetry_from_file(session_id, device_id):
     local_path = ""
 
     try:
-        local_path = get_device_file(
-            session_id=session_id,
-            device_id=device_id,
-            device_file_path=device_file_path,
-            force_temp=True,  # ignore caller's destination
-        )
+        if request.args.get("saved") == "1":
+            # Host-side saved session (output/sessions/); basename guards traversal.
+            local_path = os.path.join(_sessions_dir(), os.path.basename(device_file_path))
+            if not os.path.isfile(local_path):
+                return jsonify({"status": "error", "message": "Saved session not found"}), 404
+        else:
+            local_path = get_device_file(
+                session_id=session_id,
+                device_id=device_id,
+                device_file_path=device_file_path,
+                force_temp=True,  # ignore caller's destination
+            )
 
-        if request.args.get("app") == "vcat_ai":
+        app = request.args.get("app")
+        if not app:
+            app = "vcat_ai" if "vcatai" in os.path.basename(device_file_path) else "vcat_d"
+
+        if app == "vcat_ai":
             telemetry = read_ai_telemetry_data(session_id, local_path)
             response = build_ai_telemetry_response(telemetry, device_id)
         else:

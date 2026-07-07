@@ -36,6 +36,7 @@ function waitForChartAndStartPolling() {
     console.log("✅ Chart.js and canvas ready — starting polling");
     fetchAndUpdateTelemetry(); // Initial draw
     window.telemetryInterval = setInterval(fetchAndUpdateTelemetry, 30000);
+    updateSnapshotButtons();
   } else {
     console.log("⏳ Waiting for Chart.js and canvas...");
     setTimeout(waitForChartAndStartPolling, 100); // Retry every 100ms
@@ -49,6 +50,14 @@ function setBtnEnabled(btn, enabled) {
   btn.style.pointerEvents = enabled ? "auto" : "none";
   btn.style.opacity = enabled ? "1.0" : "0.4";
   btn.style.cursor = enabled ? "pointer" : "not-allowed";
+}
+
+// Save Snapshot + Reset Telemetry are enabled only while a live session
+// (vcat-d or vcat-ai) is active.
+function updateSnapshotButtons() {
+  const live = !!(aiLivePoll || window.telemetryInterval);
+  setBtnEnabled(document.getElementById("save-snapshot-btn"), live);
+  setBtnEnabled(document.getElementById("reset-telemetry-btn"), live);
 }
 
 async function isVcatRunning(deviceId, app = "vcat_d") {
@@ -155,6 +164,93 @@ async function getActiveLog(deviceId, appId) {
   }
 }
 
+// Snapshot the currently-live session to a host CSV (with per-core CPU columns).
+// Non-destructive — the live session keeps running.
+async function saveLiveSession() {
+  const deviceId = document.getElementById("device")?.value;
+  if (!deviceId) return alert("No device selected.");
+  const app = aiLivePoll ? "vcat_ai" : (window.telemetryInterval ? "vcat_d" : null);
+  if (!app) return alert("No live session to save — connect (Go Live) first.");
+
+  const activeLog = await getActiveLog(deviceId, app);
+  if (!activeLog) return alert("No active log file found to save.");
+
+  try {
+    const res = await fetch(
+      `/api/vcat_monitor/save_session?session=${session_token}&device=${deviceId}&telemetry_file_path=${encodeURIComponent(activeLog)}`,
+      { method: "POST" }
+    );
+    const data = await res.json();
+    if (data.status === "saved") {
+      alert(`Saved session: ${data.name}`);
+    } else {
+      alert(`Save failed: ${data.message || "error"}`);
+    }
+  } catch (err) {
+    console.error("Save session failed:", err);
+    alert("Save failed.");
+  }
+}
+
+// Browse to a session CSV, upload it to the server, then open it (no device needed).
+async function handleLoadFile(input) {
+  const file = input.files && input.files[0];
+  input.value = ""; // allow re-picking the same file
+  if (!file) return;
+  try {
+    const fd = new FormData();
+    fd.append("file", file);
+    const res = await fetch(`/api/vcat_monitor/upload_session?session=${session_token}`, {
+      method: "POST",
+      body: fd,
+    });
+    const data = await res.json();
+    if (data.status === "ok") loadSavedSession(data.name);
+    else alert(`Load failed: ${data.message || "error"}`);
+  } catch (err) {
+    console.error("Load failed:", err);
+    alert("Load failed.");
+  }
+}
+
+// Add an app-rail tab if it's missing (so Load works with no device connected).
+function ensureAppTab(appId) {
+  const rail = document.getElementById("app-rail");
+  if (!rail || document.getElementById(`app-rail-btn-${appId}`)) return;
+  const btn = document.createElement("button");
+  btn.className = "app-rail-btn";
+  btn.id = `app-rail-btn-${appId}`;
+  const icon = APP_RAIL_ICONS[appId];
+  if (icon) {
+    btn.title = icon.hover;
+    const img = document.createElement("img");
+    img.src = icon.logo; img.alt = appId;
+    btn.appendChild(img);
+  } else {
+    btn.textContent = appId;
+  }
+  btn.onclick = () => showAppTab(appId);
+  rail.appendChild(btn);
+}
+
+// Load a saved session (host CSV) — no connected device required. Infers the
+// app from the filename, reveals the UI, and opens the matching viewer.
+function loadSavedSession(name) {
+  if (!name) return;
+  const app = name.includes("vcatai") ? "vcat_ai" : "vcat_d";
+
+  const overlay = document.getElementById("no-device-overlay");
+  if (overlay) overlay.style.display = "none";
+  const tc = document.getElementById("tab-content"); if (tc) tc.style.display = "block";
+  const th = document.getElementById("tab-header"); if (th) th.style.display = "flex";
+
+  ensureAppTab(app);
+  showAppTab(app);
+
+  if (app === "vcat_ai") openAiLogFile(name, true);
+  else handleConnectClick(name, true);
+}
+
 // Tear down the vcat-ai live UI (poll loop + tab + connect button).
 function stopAiLive() {
   if (aiLivePoll) { clearInterval(aiLivePoll); aiLivePoll = null; }
@@ -176,6 +272,7 @@ function stopVcatdLive() {
     btn.title = "Connect (Go Live)";
     btn.onclick = () => handleConnectClick("Live");
   }
+  updateSnapshotButtons();
 }
 
 function setAiConnectState(connected) {
@@ -190,6 +287,7 @@ function setAiConnectState(connected) {
     btn.title = "Connect (Go Live)";
     btn.onclick = handleAiConnectClick;
   }
+  updateSnapshotButtons();
 }
 
 async function handleAiConnectClick() {
@@ -336,12 +434,12 @@ async function setDeviceConnectionState() {
 
 
 
-function handleConnectClick(source) {
+function handleConnectClick(source, saved = false) {
   const isLive = source === "Live";
   const filePath = isLive ? null : source;
 
   const deviceId = document.getElementById("device").value;
-  if (!deviceId) return alert("Select a device first.");
+  if (!deviceId && !saved) return alert("Select a device first.");
   selectedDevice = deviceId;
 
   // Mutual exclusion: going live on vcat-d while vcat-ai is live → confirm + tear down.
@@ -485,8 +583,10 @@ function handleConnectClick(source) {
           button.style.cursor = "not-allowed";
         });
   } else {
-    // ✅ Static file-based telemetry
-    const url = `/api/vcat_monitor/telemetry_from_file?session=${session_token}&device=${deviceId}&telemetry_file_path=${encodeURIComponent(filePath)}`;
+    // ✅ Static file-based telemetry (device log, or a saved host-side session — no device needed)
+    const url = saved
+      ? `/api/vcat_monitor/load_saved?session=${session_token}&name=${encodeURIComponent(filePath)}`
+      : `/api/vcat_monitor/telemetry_from_file?session=${session_token}&device=${deviceId}&app=vcat_d&telemetry_file_path=${encodeURIComponent(filePath)}`;
 
     fetch(url)
         .then(res => res.json())
@@ -554,6 +654,7 @@ function handleDisconnectClick() {
         clearInterval(window.telemetryInterval);
         window.telemetryInterval = null;
       }
+      updateSnapshotButtons();
 
       // Update UI to reflect disconnected state
       setDeviceConnectionState();
@@ -1837,7 +1938,7 @@ function updateAiProcChart(telemetry, tabId) {
 }
 
 // Open a vcat-ai log file into its own chart tab (CPU / Freq / Memory / Battery).
-function openAiLogFile(filePath) {
+function openAiLogFile(filePath, saved = false) {
   const deviceId = document.getElementById("device")?.value;
   const fileName = filePath.split("/").pop();
   const tabId = "ai-" + fileName.replace(/[^a-zA-Z0-9_-]/g, "-");
@@ -1872,8 +1973,9 @@ function openAiLogFile(filePath) {
 
   showAiTab(tabId);
 
-  const url = `/api/vcat_monitor/telemetry_from_file?session=${session_token}` +
-    `&device=${deviceId}&app=vcat_ai&telemetry_file_path=${encodeURIComponent(filePath)}`;
+  const url = saved
+    ? `/api/vcat_monitor/load_saved?session=${session_token}&name=${encodeURIComponent(filePath)}`
+    : `/api/vcat_monitor/telemetry_from_file?session=${session_token}&device=${deviceId}&app=vcat_ai&telemetry_file_path=${encodeURIComponent(filePath)}`;
   fetch(url)
     .then(res => res.json())
     .then(data => {
