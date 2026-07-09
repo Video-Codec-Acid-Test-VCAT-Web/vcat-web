@@ -149,6 +149,19 @@ def _read_cpu_usages(elapsed_time: float, row: dict) -> CpuUsageEntry:
     )
 
 
+def _read_gpu_usage(elapsed_time: float, row: dict):
+    """Optional gpu.usage column (injected into vcat-web snapshots from ADB).
+    Returns a CpuUsageEntry keyed 'gpu', or None if the column is absent/blank."""
+    val = row.get("gpu.usage")
+    if val is None or str(val).strip() == "":
+        return None
+    return CpuUsageEntry(
+        elapsed_time=elapsed_time,
+        usage_pct={"gpu": parse_float(val)},
+        raw_stats={},
+    )
+
+
 def _read_frame_drops(elapsed_time: float, row: dict) -> FramedropEntry:
     value = row.get("video.frames_dropped")
     if value is None:
@@ -302,6 +315,7 @@ def read_ai_telemetry_data(session_id, telemetry_file) -> VcataiTelemetryData:
     app_memory: list[MemoryEntry] = []
     cpu_freq: List[CpuFreguencyEntry] = []
     cpu_usage: List[CpuUsageEntry] = []
+    gpu_usage: List[CpuUsageEntry] = []
     frame_proc_time: List[ProcTimeNs] = []
     inf_time_ns: List[ProcTimeNs] = []
     inf_cpu_time_ns: List[ProcTimeNs] = []
@@ -320,6 +334,9 @@ def read_ai_telemetry_data(session_id, telemetry_file) -> VcataiTelemetryData:
         battery_data.append(_read_battery_row(elapsed_time, row))
         cpu_freq.append(_read_cpu_freqs(elapsed_time, row))
         cpu_usage.append(_read_cpu_usages(elapsed_time, row))
+        gpu = _read_gpu_usage(elapsed_time, row)
+        if gpu is not None:
+            gpu_usage.append(gpu)
         system_memory.append(_read_system_memory(elapsed_time, row))
         app_memory.append(read_app_memory(elapsed_time, row))
         system_thermal.append(_read_system_thermal(elapsed_time, row))
@@ -369,6 +386,7 @@ def read_ai_telemetry_data(session_id, telemetry_file) -> VcataiTelemetryData:
     telemetry.app_memory = app_memory
     telemetry.cpu_freq = cpu_freq
     telemetry.cpu_usage = cpu_usage
+    telemetry.gpu_usage = gpu_usage
     telemetry.system_thermal_status = system_thermal
     telemetry.frameProcTime = frame_proc_time
     telemetry.infTimeNs = inf_time_ns

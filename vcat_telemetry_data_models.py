@@ -477,6 +477,7 @@ class VcataiTelemetryData:
     app_memory: list[MemoryEntry]
     cpu_freq: List[CpuFreguencyEntry]
     cpu_usage: List[CpuUsageEntry] = field(default_factory=list)
+    gpu_usage: List[CpuUsageEntry] = field(default_factory=list)
     system_thermal_status: List[SystemThermalStatus] = field(default_factory=list)
     infTimeNs: List[ProcTimeNs] = field(default_factory=list)
     infCpuTimeNs: List[ProcTimeNs] = field(default_factory=list)
@@ -502,6 +503,7 @@ def make_empty_ai_telemetry_data() -> VcataiTelemetryData:
     obj.app_memory = []
     obj.cpu_freq = []
     obj.cpu_usage = []
+    obj.gpu_usage = []
     obj.system_thermal_status = []
     obj.infTimeNs = []
     obj.infCpuTimeNs = []

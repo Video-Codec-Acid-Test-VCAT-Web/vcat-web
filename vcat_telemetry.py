@@ -1648,6 +1648,10 @@ def build_ai_telemetry_response(telemetry, device_id: str) -> dict:
                 {"elapsed_time": e.elapsed_time, **e.usage_pct}
                 for e in telemetry.cpu_usage
             ],
+            "gpu_usage": [
+                {"elapsed_time": e.elapsed_time, **e.usage_pct}
+                for e in getattr(telemetry, "gpu_usage", []) or []
+            ],
             "cpu_freq": [
                 {"elapsed_time": e.elapsed_time, "frequencies": e.frequencies}
                 for e in telemetry.cpu_freq
@@ -1877,13 +1881,17 @@ def _adb_exec_out(device_id, shell_cmd) -> bytes:
 
 
 def _worker_extra_columns(device_id):
-    """Fixed extra columns for a session: {cpu-core-key: column} + whether GPU exists."""
+    """Fixed extra columns for a session: {cpu-core-key: column} + whether GPU exists.
+    Core keys come from raw_stats (populated on the very first /proc/stat read) rather
+    than usage_pct (empty on the first sample until there's a delta) — otherwise the
+    per-core columns get frozen out for the whole session."""
     telemetry = telemetry_dataset.get(device_id)
     cpu_cols, has_gpu = {}, False
     if telemetry:
         cpu = getattr(telemetry, "cpu_usage", None) or []
         core_keys = sorted(
-            {k for e in cpu for k in e.usage_pct if k.startswith("cpu") and k != "cpu"},
+            {k for e in cpu for k in (getattr(e, "raw_stats", None) or e.usage_pct)
+             if k.startswith("cpu") and k != "cpu"},
             key=lambda k: int(k[3:]) if k[3:].isdigit() else 0,
         )
         cpu_cols = {k: f"cpu.usage.{k[3:]}" for k in core_keys}
@@ -1895,8 +1903,10 @@ def _merge_extra(device_id, rows, log_elapsed, cpu_cols, has_gpu):
     telemetry = telemetry_dataset.get(device_id)
     if not telemetry:
         return
-    if cpu_cols:
-        _merge_worker_series(rows, log_elapsed, getattr(telemetry, "cpu_usage", []) or [], cpu_cols)
+    # Overwrite cpu.usage.total with the ADB total ('cpu') the live view uses — the
+    # app's own cpu.usage.total is on a different scale — and add per-core columns.
+    cpu_map = {"cpu": "cpu.usage.total", **cpu_cols}
+    _merge_worker_series(rows, log_elapsed, getattr(telemetry, "cpu_usage", []) or [], cpu_map)
     if has_gpu:
         _merge_worker_series(rows, log_elapsed, getattr(telemetry, "gpu_usage", []) or [], {"gpu": "gpu.usage"})
 

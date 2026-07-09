@@ -2016,8 +2016,11 @@ function updateProcessorChart(logTel, workerTel, tabId) {
   const canvas = document.getElementById(canvasId);
   if (!canvas) return;
 
-  const wCpu = (workerTel && workerTel.cpu_usage) || [];
-  const gpu = (workerTel && workerTel.gpu_usage) || [];
+  // Live: total CPU + GPU come from the ADB worker. Loaded snapshot: no worker, so
+  // read the same series straight from the file (already on the log/test timeline).
+  const wSrc = workerTel || logTel;
+  const wCpu = (wSrc && wSrc.cpu_usage) || [];
+  const gpu = (wSrc && wSrc.gpu_usage) || [];
   if (!wCpu.length && !gpu.length) return;
 
   const logCpu = (logTel && logTel.cpu_usage) || [];
@@ -2149,6 +2152,7 @@ function openAiLogFile(filePath, saved = false) {
       const telemetry = data.telemetry_data;
       renderAiTestDetails(document.getElementById(`${tabId}-ai-test-details`), data.ai_test);
       updateCpuChart(telemetry, tabId);
+      updateProcessorChart(telemetry, null, tabId);  // total CPU + GPU from the file
       updateBatteryChart(telemetry, tabId);
       updateFreqChart(telemetry, tabId);
       updateMemoryChart(telemetry, tabId);

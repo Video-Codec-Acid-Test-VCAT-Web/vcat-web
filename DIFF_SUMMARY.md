@@ -328,6 +328,29 @@ per device, one app at a time.
   `updateSnapshotButtons()` and `setDeviceConnectionState()`). The old
   "disconnect-the-other-and-switch" confirms were replaced by a guard alert.
 
+## J. Snapshot CPU/GPU round-trip fix
+
+Loading a saved vcat-ai snapshot showed **zeroed CPU and Processor charts**. Four bugs in
+the round-trip:
+
+1. **Per-core CPU columns were frozen out.** `_worker_extra_columns` derived core keys from
+   `usage_pct`, which is empty on the first `/proc/stat` read (no delta yet); the column set
+   is fixed at session start, so `cpu.usage.<core>` was never written. Now derived from
+   `raw_stats` (populated on the first read).
+2. **The snapshot kept the app's `cpu.usage.total`** (a different scale) instead of the ADB
+   total the live view uses. `_merge_extra` now overwrites `cpu.usage.total` with the ADB
+   `cpu` series and adds the per-core columns in one merge.
+3. **The reader ignored `gpu.usage`.** `vcat_telemetry_reader._read_gpu_usage()` now parses
+   it into `telemetry.gpu_usage`; `gpu_usage` added to `VcataiTelemetryData` +
+   `build_ai_telemetry_response`.
+4. **The load path never drew the Processor chart** and the worker-charts bailed with no
+   `workerTel`. `openAiLogFile` now calls `updateProcessorChart(telemetry, null, tabId)`,
+   and `updateProcessorChart` falls back to the file's own `cpu_usage`/`gpu_usage`
+   (already on the log timeline, so offset = 0).
+
+Snapshots taken *before* this fix still lack per-core CPU and carry the old
+`cpu.usage.total`; GPU now round-trips for them, but full CPU requires a fresh capture.
+
 ## ⚠️ Notes before pushing
 
 - **Debug timing values** are currently in place and should likely be reverted:
