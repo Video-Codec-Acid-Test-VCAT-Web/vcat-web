@@ -44,6 +44,7 @@ import io
 import json
 import os
 import random
+import shutil
 import re
 import struct
 import subprocess
@@ -527,6 +528,17 @@ def telemetry_worker():
                     session_last_access.pop(device_id, None)
                 continue  # Skip to next device
 
+            # Device gone (thermal shutdown, unplugged)? Stop collecting it, but keep
+            # the dataset + temp file so the client can be offered a snapshot save.
+            if not vcat_adb.is_valid_device(telemetry_data.owner_session_id, device_id):
+                if device_id not in _disconnected_devices:
+                    logger.warning(
+                        f"[Monitor] Device {device_id} disconnected — halting collection; "
+                        f"snapshot available for recovery"
+                    )
+                    _disconnected_devices.add(device_id)
+                continue
+
             if telemetry_data.app == "vcat_ai":
                 # vcat-ai test info comes from the log file (polled by the client),
                 # not an HTTP status endpoint — skip the (nonexistent) /api/test/status.
@@ -727,6 +739,18 @@ def telemetry_worker():
                             cur_thermal.soc,
                         ]],
                     )
+
+            # Maintain the live-session temp file (throttled inside).
+            refresh_session_file(
+                telemetry_data.owner_session_id, device_id, telemetry_data.app
+            )
+
+        # If every monitored device has disconnected, stop the polling thread.
+        with session_thread_lock:
+            active = [d for d in telemetry_dataset if d not in _disconnected_devices]
+        if telemetry_dataset and not active:
+            logger.info("[Monitor] All monitored devices disconnected — stopping telemetry thread")
+            break
 
         if stop_event.wait(
             timeout=get_config_option(ConfigKey.TELEMETRY_LOOP_POLL_INTERVAL)
@@ -1750,11 +1774,39 @@ def _sessions_dir() -> str:
     return d
 
 
-def save_live_session(session_id, device_id, log_device_path) -> str:
+# Per-device live-session temp file (the running merged CSV), append state, throttle.
+_session_files: Dict[str, str] = {}
+_session_state: Dict[str, dict] = {}
+_session_file_last: Dict[str, float] = {}
+_disconnected_devices: set = set()  # devices that dropped mid-session (e.g. thermal)
+SESSION_FILE_REFRESH = 10  # seconds between temp-file appends
+
+
+def _merge_worker_series(rows, log_elapsed, entries, key_to_col):
+    """Fill CSV rows with worker (ADB) values, nearest sample per row, with the
+    worker series shifted onto the log timeline (offset = latest log − latest worker)."""
+    if not entries or not rows:
+        return
+    offset = log_elapsed[-1] - entries[-1].elapsed_time
+    times = [offset + e.elapsed_time for e in entries]
+    for r, e_row in zip(rows, log_elapsed):
+        if e_row < offset - 1.0:
+            continue  # before connect — nothing captured
+        idx = bisect.bisect_left(times, e_row)
+        cands = [j for j in (idx - 1, idx) if 0 <= j < len(entries)]
+        if not cands:
+            continue
+        best = min(cands, key=lambda j: abs(times[j] - e_row))
+        for uk, col in key_to_col.items():
+            if uk in entries[best].usage_pct:
+                r[col] = entries[best].usage_pct[uk]
+
+
+def write_session_csv(session_id, device_id, log_device_path, out_path) -> str:
     """
-    Snapshot a live session: pull the active app log and add per-core CPU usage
-    columns (cpu.usage.<core>) from the ADB-collected series. Non-destructive —
-    the live session keeps running. Returns the saved host file path.
+    Build the merged session CSV: the app log plus ADB-collected columns the app
+    can't log — per-core CPU (cpu.usage.<core>) and GPU (gpu.usage) — written to
+    out_path. Used both to maintain the live temp file and to save a snapshot.
     """
     telemetry = telemetry_dataset.get(device_id)
 
@@ -1771,40 +1823,29 @@ def save_live_session(session_id, device_id, log_device_path) -> str:
     fieldnames = list(reader.fieldnames or [])
     rows = list(reader)
 
-    # Build per-core samples on the log's timeline and add them to each row.
-    if telemetry and getattr(telemetry, "cpu_usage", None) and rows:
+    if telemetry and rows:
         first_ts = int(float(rows[0]["test.timestamp"]))
         log_elapsed = [(int(float(r["test.timestamp"])) - first_ts) / 1000.0 for r in rows]
 
-        worker = telemetry.cpu_usage
-        offset = log_elapsed[-1] - worker[-1].elapsed_time  # align newest samples
+        # Per-core CPU
+        cpu = getattr(telemetry, "cpu_usage", None) or []
+        if cpu:
+            core_keys = sorted(
+                {k for e in cpu for k in e.usage_pct if k.startswith("cpu") and k != "cpu"},
+                key=lambda k: int(k[3:]) if k[3:].isdigit() else 0,
+            )
+            cpu_cols = {k: f"cpu.usage.{k[3:]}" for k in core_keys}
+            for col in cpu_cols.values():
+                if col not in fieldnames:
+                    fieldnames.append(col)
+            _merge_worker_series(rows, log_elapsed, cpu, cpu_cols)
 
-        core_keys = sorted(
-            {k for e in worker for k in e.usage_pct if k.startswith("cpu") and k != "cpu"},
-            key=lambda k: int(k[3:]) if k[3:].isdigit() else 0,
-        )
-        col_for = {k: f"cpu.usage.{k[3:]}" for k in core_keys}
-        for col in col_for.values():
-            if col not in fieldnames:
-                fieldnames.append(col)
-
-        sample_times = [offset + e.elapsed_time for e in worker]
-
-        for r, e_row in zip(rows, log_elapsed):
-            if e_row < offset - 1.0:
-                continue  # before connect — no per-core captured
-            idx = bisect.bisect_left(sample_times, e_row)
-            cands = [j for j in (idx - 1, idx) if 0 <= j < len(worker)]
-            if not cands:
-                continue
-            best = min(cands, key=lambda j: abs(sample_times[j] - e_row))
-            for k in core_keys:
-                if k in worker[best].usage_pct:
-                    r[col_for[k]] = worker[best].usage_pct[k]
-
-    base = os.path.splitext(os.path.basename(log_device_path))[0]
-    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    out_path = os.path.join(_sessions_dir(), f"{base}_snap_{stamp}.csv")
+        # GPU
+        gpu = getattr(telemetry, "gpu_usage", None) or []
+        if gpu:
+            if "gpu.usage" not in fieldnames:
+                fieldnames.append("gpu.usage")
+            _merge_worker_series(rows, log_elapsed, gpu, {"gpu": "gpu.usage"})
 
     with open(out_path, "w", encoding="utf-8", newline="") as f:
         f.writelines(preamble)
@@ -1815,17 +1856,226 @@ def save_live_session(session_id, device_id, log_device_path) -> str:
     return out_path
 
 
+def get_active_log_path(session_id, device_id, app):
+    """Newest log file in the app's test_results folder (the one being written)."""
+    folders = vcat_adb.scan_vcat_data_folders(session_id, device_id)
+    info = folders.get("vcat_ai" if app == "vcat_ai" else "vcat_d")
+    if not info:
+        return None
+    tr = info["test_results"]
+    cmd = ["adb", "-s", device_id, "shell", f"ls -1 {tr}/*.csv 2>/dev/null"]
+    out = vcat_adb.run_adb_command_with_log(session_id, device_id, cmd, log_level="debug") or ""
+    files = sorted(l.strip() for l in out.splitlines() if l.strip())
+    return files[-1] if files else None
+
+
+def _adb_exec_out(device_id, shell_cmd) -> bytes:
+    """exec-out = raw bytes (no CRLF mangling), so byte offsets stay exact."""
+    return subprocess.run(
+        ["adb", "-s", device_id, "exec-out", shell_cmd], capture_output=True
+    ).stdout
+
+
+def _worker_extra_columns(device_id):
+    """Fixed extra columns for a session: {cpu-core-key: column} + whether GPU exists."""
+    telemetry = telemetry_dataset.get(device_id)
+    cpu_cols, has_gpu = {}, False
+    if telemetry:
+        cpu = getattr(telemetry, "cpu_usage", None) or []
+        core_keys = sorted(
+            {k for e in cpu for k in e.usage_pct if k.startswith("cpu") and k != "cpu"},
+            key=lambda k: int(k[3:]) if k[3:].isdigit() else 0,
+        )
+        cpu_cols = {k: f"cpu.usage.{k[3:]}" for k in core_keys}
+        has_gpu = bool(getattr(telemetry, "gpu_usage", None))
+    return cpu_cols, has_gpu
+
+
+def _merge_extra(device_id, rows, log_elapsed, cpu_cols, has_gpu):
+    telemetry = telemetry_dataset.get(device_id)
+    if not telemetry:
+        return
+    if cpu_cols:
+        _merge_worker_series(rows, log_elapsed, getattr(telemetry, "cpu_usage", []) or [], cpu_cols)
+    if has_gpu:
+        _merge_worker_series(rows, log_elapsed, getattr(telemetry, "gpu_usage", []) or [], {"gpu": "gpu.usage"})
+
+
+def _init_session_file(device_id, log_path):
+    raw = _adb_exec_out(device_id, f"cat '{log_path}'")
+    last_nl = raw.rfind(b"\n")
+    if last_nl < 0:
+        return
+    raw = raw[: last_nl + 1]  # only complete lines
+    lines = raw.decode("utf-8", "replace").splitlines(keepends=True)
+    data_start = next((i for i, ln in enumerate(lines) if ln.strip().startswith("test.timestamp")), None)
+    if data_start is None:
+        return
+    preamble = lines[:data_start]
+    orig_fields = next(csv.reader([lines[data_start]]))
+    rows = list(csv.DictReader(io.StringIO("".join(lines[data_start:]))))
+
+    cpu_cols, has_gpu = _worker_extra_columns(device_id)
+    full_fields = list(orig_fields) + list(cpu_cols.values()) + (["gpu.usage"] if has_gpu else [])
+    first_ts = int(float(rows[0]["test.timestamp"])) if rows else 0
+    if rows:
+        log_elapsed = [(int(float(r["test.timestamp"])) - first_ts) / 1000.0 for r in rows]
+        _merge_extra(device_id, rows, log_elapsed, cpu_cols, has_gpu)
+
+    temp_path = _session_files.get(device_id) or os.path.join(
+        tempfile.gettempdir(), f"vcatweb_session_{device_id}.csv"
+    )
+    _session_files[device_id] = temp_path
+    with open(temp_path, "w", encoding="utf-8", newline="") as f:
+        f.writelines(preamble)
+        w = csv.DictWriter(f, fieldnames=full_fields, extrasaction="ignore")
+        w.writeheader()
+        w.writerows(rows)
+
+    _session_state[device_id] = {
+        "log": log_path, "offset": len(raw), "orig_fields": orig_fields,
+        "full_fields": full_fields, "first_ts": first_ts,
+        "cpu_cols": cpu_cols, "has_gpu": has_gpu,
+    }
+
+
+def _append_session_file(device_id, log_path, st):
+    raw = _adb_exec_out(device_id, f"tail -c +{st['offset'] + 1} '{log_path}'")
+    last_nl = raw.rfind(b"\n")
+    if last_nl < 0:
+        return  # no complete new line yet
+    raw = raw[: last_nl + 1]
+    dict_rows = [
+        dict(zip(st["orig_fields"], vals))
+        for vals in csv.reader(io.StringIO(raw.decode("utf-8", "replace")))
+        if vals
+    ]
+    dict_rows = [r for r in dict_rows if r.get("test.timestamp")]
+    if dict_rows:
+        log_elapsed = [(int(float(r["test.timestamp"])) - st["first_ts"]) / 1000.0 for r in dict_rows]
+        _merge_extra(device_id, dict_rows, log_elapsed, st["cpu_cols"], st["has_gpu"])
+        with open(_session_files[device_id], "a", encoding="utf-8", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=st["full_fields"], extrasaction="ignore")
+            w.writerows(dict_rows)
+    st["offset"] += len(raw)
+
+
+def refresh_session_file(session_id, device_id, app):
+    """Maintain the live-session temp file by APPENDING the log's new rows
+    (merged with ADB per-core CPU + GPU) — no full rebuild. Throttled."""
+    now = time.time()
+    if now - _session_file_last.get(device_id, 0) < SESSION_FILE_REFRESH:
+        return
+    _session_file_last[device_id] = now
+    try:
+        log_path = get_active_log_path(session_id, device_id, app)
+        if not log_path:
+            return
+        st = _session_state.get(device_id)
+        if st is None or st.get("log") != log_path:
+            _init_session_file(device_id, log_path)  # new session / new test file
+        else:
+            _append_session_file(device_id, log_path, st)
+    except Exception as e:
+        logger.error(f"refresh_session_file failed: {e}")
+
+
 @app.route("/api/vcat_monitor/save_session", methods=["POST"])
 @require_valid_session_and_device
 def api_save_session(session_id, device_id):
-    log_path = request.args.get("telemetry_file_path")
-    if not log_path or not log_path.startswith("/sdcard/"):
-        return jsonify({"status": "error", "message": "Missing/invalid telemetry_file_path"}), 400
     try:
-        out_path = save_live_session(session_id, device_id, log_path)
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        temp_path = _session_files.get(device_id)
+        st = _session_state.get(device_id)
+        log_path = request.args.get("telemetry_file_path")
+
+        # Snapshot = copy the live temp file (works even if the device disconnected).
+        if temp_path and os.path.isfile(temp_path):
+            log_name = log_path or (st and st.get("log")) or f"session_{device_id}"
+            base = os.path.splitext(os.path.basename(log_name))[0]
+            out_path = os.path.join(_sessions_dir(), f"{base}_snap_{stamp}.csv")
+            shutil.copy(temp_path, out_path)
+        elif log_path and log_path.startswith("/sdcard/"):
+            base = os.path.splitext(os.path.basename(log_path))[0]
+            out_path = os.path.join(_sessions_dir(), f"{base}_snap_{stamp}.csv")
+            write_session_csv(session_id, device_id, log_path, out_path)  # fallback build
+        else:
+            return jsonify({"status": "error", "message": "No session data to save"}), 400
+
         return jsonify({"status": "saved", "name": os.path.basename(out_path), "path": out_path})
     except Exception as e:
         logger.error(f"save_session failed: {e}")
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+_ORPHAN_PREFIX = "vcatweb_session_"
+
+
+def _list_orphan_files():
+    """Leftover live-session temp files from a previous run (crash / hard
+    shutdown). A clean stop removes its temp file, so any that survive — and are
+    not owned by a currently-active session — are orphans worth recovering."""
+    tmpdir = tempfile.gettempdir()
+    active = {os.path.abspath(p) for p in _session_files.values()}
+    out = []
+    try:
+        for name in os.listdir(tmpdir):
+            if not (name.startswith(_ORPHAN_PREFIX) and name.endswith(".csv")):
+                continue
+            path = os.path.join(tmpdir, name)
+            if os.path.abspath(path) in active or not os.path.isfile(path):
+                continue
+            try:
+                stt = os.stat(path)
+            except OSError:
+                continue
+            out.append({
+                "name": name,
+                "device_id": name[len(_ORPHAN_PREFIX):-4],
+                "size": stt.st_size,
+                "mtime": stt.st_mtime,
+            })
+    except OSError:
+        pass
+    out.sort(key=lambda o: o["mtime"], reverse=True)
+    return out
+
+
+def _resolve_orphan_path(name):
+    """Map a client-supplied name to a temp file, refusing path traversal."""
+    if not name or os.path.basename(name) != name:
+        return None
+    if not (name.startswith(_ORPHAN_PREFIX) and name.endswith(".csv")):
+        return None
+    path = os.path.join(tempfile.gettempdir(), name)
+    return path if os.path.isfile(path) else None
+
+
+@app.route("/api/vcat_monitor/orphan_sessions", methods=["GET"])
+@require_valid_session
+def api_orphan_sessions(session_id):
+    return jsonify({"orphans": _list_orphan_files()})
+
+
+@app.route("/api/vcat_monitor/recover_orphan", methods=["POST"])
+@require_valid_session
+def api_recover_orphan(session_id):
+    name = request.args.get("file")
+    path = _resolve_orphan_path(name)
+    if not path:
+        return jsonify({"status": "error", "message": "Unknown orphan file"}), 400
+    try:
+        if request.args.get("discard") == "1":
+            os.remove(path)
+            return jsonify({"status": "discarded", "name": name})
+        device_id = name[len(_ORPHAN_PREFIX):-4]
+        stamp = datetime.fromtimestamp(os.path.getmtime(path)).strftime("%Y%m%d-%H%M%S")
+        out_path = os.path.join(_sessions_dir(), f"recovered_{device_id}_{stamp}.csv")
+        shutil.copy(path, out_path)
+        os.remove(path)  # recovered — clear the orphan
+        return jsonify({"status": "recovered", "name": os.path.basename(out_path), "path": out_path})
+    except Exception as e:
+        logger.error(f"recover_orphan failed: {e}")
         return jsonify({"status": "error", "message": str(e)}), 500
 
 
@@ -2033,6 +2283,7 @@ def api_telemetry(session_id, device_id):
             return jsonify({"message": "Telemetry not avaiable yet."}), 202
 
         response = build_telemetry_response(telemetry, device_id)
+        response["disconnected"] = device_id in _disconnected_devices
 
         touch_session_access(session_id, device_id)
         vcat_adb.touchConsole(session_id)
@@ -2137,6 +2388,17 @@ def api_stop_device_monitor(session_id, device_id):
 
         if not telemetry_dataset:
             stop_event.set()
+
+    # Drop the live-session temp file for this device.
+    _session_file_last.pop(device_id, None)
+    _session_state.pop(device_id, None)
+    _disconnected_devices.discard(device_id)
+    tmp = _session_files.pop(device_id, None)
+    if tmp:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
 
     logger.info(
         f"api/vcat_monitor/stop: executed for device id '[{device_id}] and session_id '[{session_id}]"

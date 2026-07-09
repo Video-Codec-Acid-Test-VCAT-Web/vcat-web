@@ -166,6 +166,36 @@ async function getActiveLog(deviceId, appId) {
 
 // Snapshot the currently-live session to a host CSV (with per-core CPU columns).
 // Non-destructive — the live session keeps running.
+// At startup: if a previous run left behind live-session temp files (crash /
+// hard shutdown before a snapshot was taken), offer to recover them to Downloads.
+async function checkOrphanSessions() {
+  let orphans = [];
+  try {
+    const res = await fetch(`/api/vcat_monitor/orphan_sessions?session=${session_token}`);
+    orphans = (await res.json()).orphans || [];
+  } catch (e) { return; }
+  if (!orphans.length) return;
+
+  const list = orphans.map(o => `  • ${o.device_id} (${fmtFileSize(o.size)})`).join("\n");
+  const recover = confirm(
+    `Found ${orphans.length} unsaved session${orphans.length > 1 ? "s" : ""} ` +
+    `from a previous run (the server may have exited unexpectedly):\n\n${list}\n\n` +
+    `Save ${orphans.length > 1 ? "them" : "it"} to your Downloads folder?`
+  );
+  for (const o of orphans) {
+    try {
+      const q = recover ? "" : "&discard=1";
+      const res = await fetch(
+        `/api/vcat_monitor/recover_orphan?session=${session_token}&file=${encodeURIComponent(o.name)}${q}`,
+        { method: "POST" }
+      );
+      const data = await res.json();
+      if (recover && data.status === "recovered") console.log("Recovered session:", data.name);
+    } catch (e) { console.error("orphan recover failed:", e); }
+  }
+  if (recover) alert(`Recovered ${orphans.length} session${orphans.length > 1 ? "s" : ""} to Downloads.`);
+}
+
 async function saveLiveSession() {
   const deviceId = document.getElementById("device")?.value;
   if (!deviceId) return alert("No device selected.");
@@ -277,6 +307,47 @@ function stopVcatdLive() {
   updateSnapshotButtons();
 }
 
+// The device dropped mid-session (e.g. thermal shutdown / unplug). Stop the
+// live poll, offer to save a snapshot (server copies the temp file — no device
+// needed), then tear down the session UI.
+let _disconnectHandled = false;
+async function onDeviceDisconnected(app, deviceId) {
+  if (_disconnectHandled) return;
+  _disconnectHandled = true;
+  // Halt both poll loops immediately so nothing re-fires during the dialog.
+  if (aiLivePoll) { clearInterval(aiLivePoll); aiLivePoll = null; }
+  if (window.telemetryInterval) { clearInterval(window.telemetryInterval); window.telemetryInterval = null; }
+  try {
+    const save = confirm(
+      "The device disconnected (it may have shut down or been unplugged).\n\n" +
+      "Save a snapshot of this session before closing it?"
+    );
+    if (save && deviceId) {
+      try {
+        const res = await fetch(
+          `/api/vcat_monitor/save_session?session=${session_token}&device=${deviceId}`,
+          { method: "POST" }
+        );
+        const data = await res.json();
+        alert(data.status === "saved"
+          ? `Snapshot saved: ${data.name}`
+          : `Save failed: ${data.message || "unknown error"}`);
+      } catch (e) {
+        console.error("disconnect snapshot save failed:", e);
+        alert("Snapshot save failed.");
+      }
+    }
+    // Tell the server to drop the session (removes temp file, clears state).
+    if (deviceId) {
+      fetch(`/api/vcat_monitor/stop?session=${session_token}&device=${deviceId}`,
+            { method: "POST" }).catch(() => {});
+    }
+    if (app === "vcat_ai") stopAiLive(); else stopVcatdLive();
+  } finally {
+    _disconnectHandled = false;
+  }
+}
+
 function setAiConnectState(connected) {
   const btn = document.getElementById("ai-connect-btn");
   if (!btn) return;
@@ -337,6 +408,7 @@ async function handleAiConnectClick() {
     let workerTel = null;
     try {
       const sys = await (await fetch(`${API_TELEMETRY}?session=${session_token}&device=${deviceId}`)).json();
+      if (sys.disconnected) { onDeviceDisconnected("vcat_ai", deviceId); return; }
       workerTel = sys.telemetry_data || null;
     } catch (err) { /* keep polling */ }
 
@@ -350,7 +422,8 @@ async function handleAiConnectClick() {
         )).json();
         const lt = lg.telemetry_data;
         if (lt) {
-          updateMixedCpuChart(lt, workerTel, tabId); // total (log) + per-core (worker)
+          updateMixedCpuChart(lt, workerTel, tabId);   // total + per-core (ADB worker)
+          updateProcessorChart(lt, workerTel, tabId);  // total CPU + GPU (ADB worker)
           updateFreqChart(lt, tabId);
           updateMemoryChart(lt, tabId);
           updateBatteryChart(lt, tabId);
@@ -889,47 +962,36 @@ function updateBatteryChart(telemetry, tabId) {
 }
 
 
-// Live CPU chart: Total CPU from the log (full test history) + per-core from the
-// ADB worker (starts at connect). Per-core samples are shifted onto the log's
-// timeline (offset = latest-log-elapsed − latest-worker-elapsed) so they align.
+// Live CPU chart: Total + per-core, both from the ADB worker (/proc/stat, 0-100%).
+// The log's cpu.usage.total is ignored (it's on a different scale). Worker samples
+// (which start at connect) are shifted onto the log's timeline so they align with
+// the other charts: offset = latest-log-elapsed − latest-worker-elapsed.
 function updateMixedCpuChart(logTel, workerTel, tabId) {
   const canvasId = `${tabId}-cpuChart`;
   const canvas = document.getElementById(canvasId);
   if (!canvas) return;
 
-  const logCpu = (logTel && logTel.cpu_usage) || [];
   const wCpu = (workerTel && workerTel.cpu_usage) || [];
-  if (!logCpu.length && !wCpu.length) return;
+  if (!wCpu.length) return;
 
-  const datasets = [];
+  const logCpu = (logTel && logTel.cpu_usage) || [];
+  const logMax = logCpu.length ? logCpu.at(-1).elapsed_time : wCpu.at(-1).elapsed_time;
+  const offset = logMax - wCpu.at(-1).elapsed_time;
 
-  if (logCpu.length) {
-    datasets.push({
-      label: "Total CPU (%)",
-      data: logCpu.map(p => ({ x: p.elapsed_time, y: p.cpu ?? null })),
-      borderColor: COLORS[0], backgroundColor: COLORS[0],
-      borderWidth: 2, tension: 0.1, pointRadius: 0,
-    });
-  }
+  const last = wCpu.at(-1);
+  const coreKeys = Object.keys(last).filter(k => k.startsWith("cpu") && k !== "cpu")
+    .sort((a, b) => (parseInt(a.slice(3)) || 0) - (parseInt(b.slice(3)) || 0));
+  const keys = ["cpu", ...coreKeys].filter(k => k in last);
 
-  const lastW = wCpu.at(-1);
-  if (lastW) {
-    const logMax = logCpu.length ? logCpu.at(-1).elapsed_time : 0;
-    const offset = logMax - wCpu.at(-1).elapsed_time; // align newest samples
-    const coreKeys = Object.keys(lastW).filter(k => k.startsWith("cpu") && k !== "cpu");
-    coreKeys.forEach((key, i) => {
-      datasets.push({
-        label: key,
-        data: wCpu.map(p => ({ x: offset + p.elapsed_time, y: p[key] ?? null })),
-        borderColor: COLORS[(i + 1) % COLORS.length],
-        backgroundColor: COLORS[(i + 1) % COLORS.length],
-        borderWidth: 2, tension: 0.1, pointRadius: 0,
-      });
-    });
-  }
+  const datasets = keys.map((key, i) => ({
+    label: key === "cpu" ? "Total CPU (%)" : key,
+    data: wCpu.map(p => ({ x: offset + p.elapsed_time, y: p[key] ?? null })),
+    borderColor: COLORS[i % COLORS.length],
+    backgroundColor: COLORS[i % COLORS.length],
+    borderWidth: 2, tension: 0.1, pointRadius: 0,
+  }));
 
-  const latestTime = logCpu.length ? logCpu.at(-1).elapsed_time : 0;
-  const stepSize = computeStepSize(latestTime);
+  const stepSize = computeStepSize(logMax);
 
   chartsByTabId[tabId] ||= {};
   let ref = chartsByTabId[tabId].cpuChart;
@@ -937,11 +999,11 @@ function updateMixedCpuChart(logTel, workerTel, tabId) {
     ref = new Chart(canvas.getContext("2d"), {
       type: "line",
       data: { datasets },
-      options: chartOptions("CPU Usage (%)", latestTime, stepSize),
+      options: chartOptions("CPU Usage (%)", logMax, stepSize),
     });
   } else {
     ref.data.datasets = datasets;
-    ref.options.scales.x.max = latestTime + 60;
+    ref.options.scales.x.max = logMax + 60;
     ref.options.scales.x.ticks.stepSize = stepSize;
     ref.update();
   }
@@ -1129,6 +1191,7 @@ async function fetchAndUpdateTelemetry() {
     const result = await (await fetch(
       `${API_TELEMETRY}?session=${session_token}&device=${selectedDevice}`
     )).json();
+    if (result.disconnected) { onDeviceDisconnected("vcat_d", selectedDevice); return; }
     workerTel = result.telemetry_data || null;
     if (result.test_details) updateTestDetailsUI({ test_details: result.test_details }, tabId);
   } catch (err) {
@@ -1780,6 +1843,7 @@ function setupAiTelemetryCanvas(tabId) {
   if (grid) {
     grid.appendChild(makeChartWrapper("aiProcChart", "AI Processing Time (ms)"));
     grid.appendChild(makeChartWrapper("tempChart", "Temperature"));
+    grid.appendChild(makeChartWrapper("gpuChart", "Processor Usage (%)"));
   }
 
   // vcat-ai test details are a rich nested structure, not vcat-d's fixed fields —
@@ -1919,6 +1983,61 @@ function updateTempChart(telemetry, tabId) {
 }
 
 // AI Processing Time chart: frame-proc / inference / inference-cpu, ns -> ms.
+// Processor Usage chart: total CPU + GPU, both from the ADB worker (GPU is
+// device-dependent — Adreno/Qualcomm). Shifted onto the log's timeline like the
+// mixed CPU chart so they align with the other charts.
+function updateProcessorChart(logTel, workerTel, tabId) {
+  const canvasId = `${tabId}-gpuChart`;
+  const canvas = document.getElementById(canvasId);
+  if (!canvas) return;
+
+  const wCpu = (workerTel && workerTel.cpu_usage) || [];
+  const gpu = (workerTel && workerTel.gpu_usage) || [];
+  if (!wCpu.length && !gpu.length) return;
+
+  const logCpu = (logTel && logTel.cpu_usage) || [];
+  const ref = wCpu.length ? wCpu : gpu;
+  const logMax = logCpu.length ? logCpu.at(-1).elapsed_time : ref.at(-1).elapsed_time;
+
+  const datasets = [];
+  if (wCpu.length) {
+    const offset = logMax - wCpu.at(-1).elapsed_time;
+    datasets.push({
+      label: "Total CPU (%)",
+      data: wCpu.map(p => ({ x: offset + p.elapsed_time, y: p.cpu ?? null })),
+      borderColor: COLORS[0], backgroundColor: COLORS[0],
+      borderWidth: 2, tension: 0.1, pointRadius: 0,
+    });
+  }
+  if (gpu.length) {
+    const offset = logMax - gpu.at(-1).elapsed_time;
+    datasets.push({
+      label: "GPU (%)",
+      data: gpu.map(p => ({ x: offset + p.elapsed_time, y: p.gpu ?? null })),
+      borderColor: COLORS[1], backgroundColor: COLORS[1],
+      borderWidth: 2, tension: 0.1, pointRadius: 0,
+    });
+  }
+
+  const stepSize = computeStepSize(logMax);
+
+  chartsByTabId[tabId] ||= {};
+  let chart = chartsByTabId[tabId].gpuChart;
+  if (!chart) {
+    chart = new Chart(canvas.getContext("2d"), {
+      type: "line",
+      data: { datasets },
+      options: chartOptions("Processor Usage (%)", logMax, stepSize),
+    });
+  } else {
+    chart.data.datasets = datasets;
+    chart.options.scales.x.max = logMax + 60;
+    chart.options.scales.x.ticks.stepSize = stepSize;
+    chart.update();
+  }
+  chartsByTabId[tabId].gpuChart = chart;
+}
+
 function updateAiProcChart(telemetry, tabId) {
   const series = [
     { key: "frameProcTime", label: "Frame Proc" },
@@ -2349,6 +2468,8 @@ function populateDeviceDropdown() {
     .then(data => {
       session_token = data.session_token;
       console.log("✅ Session Token:", session_token);
+
+      checkOrphanSessions();  // offer to recover any leftover session from a crash
 
       return fetch(`${API_BASE}/api/all_connected_devices?session=${session_token}`);
     })

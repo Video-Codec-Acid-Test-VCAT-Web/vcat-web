@@ -273,6 +273,38 @@ and reopen any session CSV later — no device required.
   succeeded). `stopCurrentLiveSession()` tears down vcat-ai (`handleAiDisconnectClick`) or
   vcat-d (`/stop` + `stopVcatdLive`).
 
+## H. Device-disconnect & crash resilience
+
+A DUT can drop mid-session (thermal shutdown, unplug) or the server itself can die.
+Both cases now preserve the in-progress session data instead of losing it.
+
+### Device disconnect (server)
+- `_disconnected_devices: set` tracks devices that dropped mid-session.
+- The telemetry worker checks `vcat_adb.is_valid_device(...)` per device before polling;
+  on failure it logs once, adds the device to `_disconnected_devices`, and skips it. When
+  **all** monitored devices are disconnected the worker breaks (stops the thread).
+- `GET /api/vcat_monitor/telemetry` now returns `disconnected: true` for such devices.
+- `POST /api/vcat_monitor/save_session` is device-optional: if a live temp file exists it
+  copies that (works after the device is gone), deriving the snapshot name from stored
+  session state; the old log-pull path remains as a fallback. `/stop` also clears
+  `_disconnected_devices`.
+
+### Device disconnect (frontend)
+- Both live polls (vcat-d `fetchAndUpdateTelemetry`, vcat-ai poll) detect `disconnected`
+  and call `onDeviceDisconnected(app, deviceId)` — halts both poll loops, offers to save a
+  snapshot (server-side temp copy), then `/stop`s and tears down the app's live UI. Guarded
+  by `_disconnectHandled` so it fires once.
+
+### Crash / orphan recovery
+- A clean `/stop` deletes its temp file, so any surviving `vcatweb_session_*.csv` in the
+  temp dir is an orphan from an unexpected exit.
+- `GET /api/vcat_monitor/orphan_sessions` lists orphans not owned by an active session
+  (name, device_id, size, mtime). `POST /api/vcat_monitor/recover_orphan?file=…` copies the
+  orphan to `~/Downloads/recovered_<device>_<ts>.csv` and deletes it, or `&discard=1` just
+  deletes it. Both guard against path traversal (basename must match the prefix).
+- Frontend `checkOrphanSessions()` runs once at startup (after the session token): if
+  orphans exist it prompts to recover them all to Downloads (or discard).
+
 ## ⚠️ Notes before pushing
 
 - **Debug timing values** are currently in place and should likely be reverted:
