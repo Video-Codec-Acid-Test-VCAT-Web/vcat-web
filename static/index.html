@@ -24,7 +24,6 @@
         <div id="snapshot-actions" style="display: flex; gap: 14px; align-items: center; margin-top: 8px;">
             <img id="save-snapshot-btn" src="/static/btn_save_snapshot.png" onclick="saveLiveSession()" title="Save a snapshot of the live session" style="height: 44px; width: auto; cursor: pointer; opacity: 0.4; pointer-events: none;" />
             <img id="load-snapshot-btn" src="/static/btn_load_snapshot.png" onclick="document.getElementById('load-file').click()" title="Load a snapshot" style="height: 44px; width: auto; cursor: pointer;" />
-            <img id="reset-telemetry-btn" src="/static/btn_reset_telemetry.png" onclick="openResetModal()" title="Reset Telemetry" style="height: 44px; width: auto; cursor: pointer; opacity: 0.4; pointer-events: none;" />
             <input type="file" id="load-file" accept=".csv" style="display: none;" onchange="handleLoadFile(this)" />
         </div>
         <!--snapshot actions -->
@@ -187,17 +186,6 @@
         <div id="console-modal" class="console-float" style="display: none;">
             <div id="console-modal-header" class="modal-header">Console<span class="modal-close" onclick="closeConsoleModal()">×</span></div>
             <pre id="console-full" class="console-body"></pre>
-        </div>
-        <div id="reset-modal" class="modal-overlay">
-            <div class="modal-content" style="top: 30%; left: 50%; transform: translateX(-50%); text-align: center;">
-                <div style="font-weight: bold; font-size: 16px; margin-bottom: 10px;">Reset Telemetry?</div>
-                <div style="margin-bottom: 16px;">This will close the current live session.</div>
-                <div style="display: flex; gap: 12px; justify-content: center;">
-                    <button type="button" onclick="closeResetModal()">Cancel</button>
-                    <button type="button" onclick="confirmReset(false)">Reset</button>
-                    <button type="button" onclick="confirmReset(true)">Save &amp; Reset</button>
-                </div>
-            </div>
         </div>
         <div id="wireless-modal" class="modal-overlay">
             <div class="modal-content"></div>

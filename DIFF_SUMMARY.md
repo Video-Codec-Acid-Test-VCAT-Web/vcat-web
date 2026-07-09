@@ -259,19 +259,13 @@ and reopen any session CSV later — no device required.
 
 ### Frontend
 - Top-level image buttons next to **Device** (peers, boxless): **Save Snapshot**
-  (`btn_save_snapshot.png`) and **Load Snapshot** (`btn_load_snapshot.png`), plus
-  **Reset Telemetry** moved here from the per-tab toolbar.
+  (`btn_save_snapshot.png`) and **Load Snapshot** (`btn_load_snapshot.png`).
 - **Load** = browse to a CSV → upload → `loadSavedSession()` reveals the UI (no device
   needed), `ensureAppTab()` adds the rail tab, and opens the matching app viewer with
   per-core CPU shown. Save/open paths (`handleConnectClick`, `openAiLogFile`) are now
   device-optional / `saved`-aware.
-- `updateSnapshotButtons()` enables **Save** and **Reset** only while a live session is
-  active; **Load** is always enabled.
-- **Reset Telemetry** now closes the live session. Its (previously empty) modal is filled
-  and centered with three choices: **Cancel**, **Reset** (close the session), and
-  **Save & Reset** (snapshot to Downloads first, then close — only closes if the save
-  succeeded). `stopCurrentLiveSession()` tears down vcat-ai (`handleAiDisconnectClick`) or
-  vcat-d (`/stop` + `stopVcatdLive`).
+- `updateSnapshotButtons()` enables **Save** only while a live session is active; **Load**
+  is always enabled. (Session termination is covered in section I.)
 
 ## H. Device-disconnect & crash resilience
 
@@ -304,6 +298,28 @@ Both cases now preserve the in-progress session data instead of losing it.
   deletes it. Both guard against path traversal (basename must match the prefix).
 - Frontend `checkOrphanSessions()` runs once at startup (after the session token): if
   orphans exist it prompts to recover them all to Downloads (or discard).
+
+## I. Session-control model (Connect / Disconnect only)
+
+Consolidated a confused Connect/Disconnect/Reset scheme. **Reset Telemetry did the same
+thing as Disconnect** (both stop the server worker, discard state, and invalidate the
+session) — it was just Disconnect with a save prompt — so it was removed. One live session
+per device, one app at a time.
+
+- **Reset button + modal removed** (`btn_reset_telemetry`, `#reset-modal`, and
+  `openResetModal`/`confirmReset`/`closeResetModal`). `resetTelemetry()` is now unused.
+- **Disconnect = confirm → offer snapshot → terminate** via `confirmTerminateSession()`
+  (two native dialogs: confirm the disconnect, then "save a snapshot?"; a failed save keeps
+  the session so nothing is lost). Wired to both app Disconnect buttons
+  (`handleDisconnectClick`, `promptAiDisconnect`); the actual teardown is still
+  `stopCurrentLiveSession()`.
+- **Changing the device while live** runs the same confirm/save/terminate against the
+  *old* device, then commits the switch; Cancel (or a failed save) reverts the dropdown to
+  the previous device (`handleDeviceSelection`, `_lastDeviceValue`).
+- **One app at a time by disabling**, not silent switching: while one app is live the other
+  app's **Connect** is disabled (`refreshConnectAvailability()`, called from
+  `updateSnapshotButtons()` and `setDeviceConnectionState()`). The old
+  "disconnect-the-other-and-switch" confirms were replaced by a guard alert.
 
 ## ⚠️ Notes before pushing
 

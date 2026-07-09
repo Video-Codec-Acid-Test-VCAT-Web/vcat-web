@@ -52,12 +52,29 @@ function setBtnEnabled(btn, enabled) {
   btn.style.cursor = enabled ? "pointer" : "not-allowed";
 }
 
-// Save Snapshot + Reset Telemetry are enabled only while a live session
-// (vcat-d or vcat-ai) is active.
+// Save Snapshot is enabled only while a live session (vcat-d or vcat-ai) is active.
 function updateSnapshotButtons() {
   const live = !!(aiLivePoll || window.telemetryInterval);
   setBtnEnabled(document.getElementById("save-snapshot-btn"), live);
-  setBtnEnabled(document.getElementById("reset-telemetry-btn"), live);
+  refreshConnectAvailability();
+}
+
+// One app at a time: while one app's session is live, the OTHER app's Connect
+// button is disabled so the user must explicitly Disconnect before switching.
+// (When an app is live, its own button is the Disconnect toggle and stays on.)
+function refreshConnectAvailability() {
+  const dLive = !!window.telemetryInterval;
+  const aiLive = !!aiLivePoll;
+  const dBtn = document.getElementById("connect-btn");
+  const aiBtn = document.getElementById("ai-connect-btn");
+  if (dBtn) {
+    setBtnEnabled(dBtn, !aiLive);
+    if (aiLive) dBtn.title = "Disconnect the vcat-ai session first";
+  }
+  if (aiBtn) {
+    setBtnEnabled(aiBtn, !dLive);
+    if (dLive) aiBtn.title = "Disconnect the vcat-d session first";
+  }
 }
 
 async function isVcatRunning(deviceId, app = "vcat_d") {
@@ -354,7 +371,7 @@ function setAiConnectState(connected) {
   if (connected) {
     btn.src = "/static/btn_disconnect_device.png";
     btn.title = "Disconnect";
-    btn.onclick = handleAiDisconnectClick;
+    btn.onclick = promptAiDisconnect;
   } else {
     btn.src = "/static/btn_connect_device.png";
     btn.title = "Connect (Go Live)";
@@ -367,10 +384,10 @@ async function handleAiConnectClick() {
   const deviceId = document.getElementById("device")?.value;
   if (!deviceId) return;
 
-  // Mutual exclusion: if vcat-d is live, confirm, then tear down its live UI.
+  // One app at a time: this button is disabled while vcat-d is live, but guard anyway.
   if (window.telemetryInterval) {
-    if (!confirm("vcat-d is connected. Disconnect it and connect vcat-ai?")) return;
-    stopVcatdLive();
+    alert("Disconnect the active vcat-d session before connecting vcat-ai.");
+    return;
   }
 
   try {
@@ -443,6 +460,11 @@ async function handleAiConnectClick() {
   updateAiToolbar(deviceId);
 }
 
+// The vcat-ai Disconnect button: confirm + offer snapshot, then tear down.
+function promptAiDisconnect() {
+  confirmTerminateSession("Disconnect vcat-ai monitoring on this device?");
+}
+
 async function handleAiDisconnectClick() {
   const deviceId = document.getElementById("device")?.value;
   if (aiLivePoll) { clearInterval(aiLivePoll); aiLivePoll = null; }
@@ -498,6 +520,9 @@ async function setDeviceConnectionState() {
     btn.style.opacity = "1.0";
     btn.style.cursor = "pointer";
 
+    // ...but keep it disabled if the other app owns the live session.
+    refreshConnectAvailability();
+
   } catch (err) {
     console.error("Failed to check connection state:", err);
     btn.disabled = true;
@@ -517,10 +542,10 @@ function handleConnectClick(source, saved = false) {
   if (!deviceId && !saved) return alert("Select a device first.");
   selectedDevice = deviceId;
 
-  // Mutual exclusion: going live on vcat-d while vcat-ai is live → confirm + tear down.
+  // One app at a time: this button is disabled while vcat-ai is live, but guard anyway.
   if (isLive && aiLivePoll) {
-    if (!confirm("vcat-ai is connected. Disconnect it and connect vcat-d?")) return;
-    stopAiLive();
+    alert("Disconnect the active vcat-ai session before connecting vcat-d.");
+    return;
   }
 
   // Safe tab ID generation
@@ -716,32 +741,7 @@ function renderTelemetryTab(tabId) {
 function handleDisconnectClick() {
   const deviceId = document.getElementById("device").value;
   if (!deviceId) return alert("Select a device first.");
-
-  fetch(`${API_BASE}/api/vcat_monitor/stop?session=${session_token}&device=${deviceId}`, {
-    method: "POST"
-  })
-    .then(res => {
-      if (!res.ok) throw new Error("Failed to stop telemetry");
-      console.log("🛑 Telemetry stopped");
-
-      // Stop polling loop if needed
-      if (window.telemetryInterval) {
-        clearInterval(window.telemetryInterval);
-        window.telemetryInterval = null;
-      }
-      updateSnapshotButtons();
-
-      // Update UI to reflect disconnected state
-      setDeviceConnectionState();
-      resetTelemetry();
-    })
-    .catch(err => {
-      console.error("❌ Telemetry stop failed:", err);
-      const button = document.getElementById("connect-btn");
-      button.disabled = true;
-      button.style.opacity = "0.5";
-      button.style.cursor = "not-allowed";
-    });
+  confirmTerminateSession("Disconnect vcat-d monitoring on this device?");
 }
 
 
@@ -1444,17 +1444,19 @@ function sendControlCommand(cmd) {
     });
 }
 
-function openResetModal() {
-  document.getElementById("reset-modal").style.display = "block";
-}
-
-function closeResetModal() {
-  document.getElementById("reset-modal").style.display = "none";
-}
-
-function confirmResetTelemetry() {
-  resetTelemetry();
-  closeResetModal();
+// User-initiated end of a live session (Disconnect, or a device change). Two
+// dialogs: confirm the disconnect, then offer a snapshot, then tear down. Ending
+// a session stops the server monitor thread and discards its state — the session
+// is no longer valid afterward. Returns true if terminated, false if the user
+// cancelled (or the requested save failed, so nothing is lost).
+async function confirmTerminateSession(promptText) {
+  if (!(aiLivePoll || window.telemetryInterval)) return true; // nothing live
+  if (!confirm(promptText || "Disconnect the active monitoring session?")) return false;
+  if (confirm("Save a snapshot of this session before disconnecting?")) {
+    if (!(await saveLiveSession())) return false; // save failed → keep the session
+  }
+  stopCurrentLiveSession();
+  return true;
 }
 
 // Stop + tear down whichever live session is active (vcat-ai or vcat-d).
@@ -1469,13 +1471,6 @@ function stopCurrentLiveSession() {
     }
     stopVcatdLive();
   }
-}
-
-// Reset = close the live session; optionally snapshot it first.
-async function confirmReset(save) {
-  closeResetModal();
-  if (save && !(await saveLiveSession())) return; // don't close if the save failed
-  stopCurrentLiveSession();
 }
 
 function resetTestStatus() {
@@ -1593,9 +1588,23 @@ function updatePlayerControlsState(tabId) {
 }
 
 
-function handleDeviceSelection() {
+let _lastDeviceValue = null;
+
+async function handleDeviceSelection() {
   const deviceSelect = document.getElementById("device");
   const selectedDeviceId = deviceSelect?.value;
+
+  // Changing the device ends any live session (a session is tied to one device).
+  // Operate the confirm/save/teardown against the OLD device, then commit or revert.
+  if ((aiLivePoll || window.telemetryInterval) && selectedDeviceId !== _lastDeviceValue) {
+    deviceSelect.value = _lastDeviceValue;  // teardown targets the still-selected old device
+    const ok = await confirmTerminateSession(
+      "Changing the device will end the active monitoring session. Continue?"
+    );
+    if (!ok) return;                        // cancelled / save failed → stay on old device
+    deviceSelect.value = selectedDeviceId;  // committed → switch to the new device
+  }
+  _lastDeviceValue = selectedDeviceId;
 
   if (selectedDeviceId && deviceSelect.options.length > 0) {
     updateDeviceTabLabel(selectedDeviceId);
