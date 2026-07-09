@@ -1452,11 +1452,27 @@ function sendControlCommand(cmd) {
 async function confirmTerminateSession(promptText) {
   if (!(aiLivePoll || window.telemetryInterval)) return true; // nothing live
   if (!confirm(promptText || "Disconnect the active monitoring session?")) return false;
-  if (confirm("Save a snapshot of this session before disconnecting?")) {
-    if (!(await saveLiveSession())) return false; // save failed → keep the session
-  }
+  const choice = await askSaveChoice();     // Save / Discard / Cancel
+  if (choice === "cancel") return false;    // last chance to abort the disconnect
+  if (choice === "save" && !(await saveLiveSession())) return false; // save failed → keep
   stopCurrentLiveSession();
   return true;
+}
+
+// 3-choice save prompt shown after the user confirms a disconnect. Resolves to
+// "save", "discard", or "cancel" (cancel aborts the whole disconnect).
+let _saveChoiceResolve = null;
+function askSaveChoice() {
+  return new Promise((resolve) => {
+    _saveChoiceResolve = resolve;
+    document.getElementById("save-choice-modal").style.display = "block";
+  });
+}
+function resolveSaveChoice(choice) {
+  document.getElementById("save-choice-modal").style.display = "none";
+  const r = _saveChoiceResolve;
+  _saveChoiceResolve = null;
+  if (r) r(choice);
 }
 
 // Stop + tear down whichever live session is active (vcat-ai or vcat-d).
@@ -2465,11 +2481,7 @@ function populateDeviceInfo(info) {
 function populateDeviceDropdown() {
   console.log("➡️ Calling populateDeviceDropdown");
 
-  // Elements needed for visual fallback
   const deviceSelect = document.getElementById("device");
-  const noDeviceOverlay = document.getElementById("no-device-overlay");
-  const tabContent = document.getElementById("tab-content");
-  const tabHeader = document.getElementById("tab-header");
 
   // Get session token first
   fetch(`${API_BASE}/api/session_token`)
@@ -2480,53 +2492,75 @@ function populateDeviceDropdown() {
 
       checkOrphanSessions();  // offer to recover any leftover session from a crash
 
-      return fetch(`${API_BASE}/api/all_connected_devices?session=${session_token}`);
-    })
-    .then(res => res.json())
-    .then(devices => {
-      console.log("📦 Device list:", devices);
-      deviceSelect.innerHTML = "";
-
-      // Remove any default placeholder option
+      // Drop the "Loading devices..." placeholder, bind the change handler once,
+      // then populate — and keep polling for hot-plugged / removed devices.
       const firstOption = deviceSelect.options[0];
-      if (firstOption && firstOption.disabled) {
-        deviceSelect.remove(0);
-      }
+      if (firstOption && firstOption.disabled) deviceSelect.remove(0);
+      deviceSelect.addEventListener("change", handleDeviceSelection);
 
-      // Populate dropdown if devices are present
-      if (devices.length > 0) {
-        noDeviceOverlay.style.display = "none";
-        tabContent.style.display = "block";
-        tabHeader.style.display = "flex";
-
-        devices.forEach(deviceId => {
-          const opt = document.createElement("option");
-          opt.value = deviceId;
-          opt.textContent = deviceId;
-          deviceSelect.appendChild(opt);
-        });
-
-        // Bind handler once
-        deviceSelect.addEventListener("change", handleDeviceSelection);
-
-        // Auto-select first device
-        deviceSelect.value = devices[0];
-        handleDeviceSelection();
-
-        setTimeout(updateConsoleLog, 500);
-      } else {
-        console.warn("🚫 No connected devices found.");
-        noDeviceOverlay.style.display = "block";
-        tabContent.style.display = "none";
-        tabHeader.style.display = "none";
-      }
+      return syncDeviceList(true);
+    })
+    .then(() => {
+      if (_deviceListInterval) clearInterval(_deviceListInterval);
+      _deviceListInterval = setInterval(() => syncDeviceList(false), 5000);
     })
     .catch(err => {
       console.error("❌ Failed during device/session load:", err);
-      noDeviceOverlay.style.display = "block";
-      tabContent.style.display = "none";
-      tabHeader.style.display = "none";
+      showNoDeviceUI(true);
     });
+}
+
+// Show/hide the "no device connected" overlay and the main tab UI.
+function showNoDeviceUI(none) {
+  const overlay = document.getElementById("no-device-overlay");
+  const tabContent = document.getElementById("tab-content");
+  const tabHeader = document.getElementById("tab-header");
+  if (overlay) overlay.style.display = none ? "block" : "none";
+  if (tabContent) tabContent.style.display = none ? "none" : "block";
+  if (tabHeader) tabHeader.style.display = none ? "none" : "flex";
+}
+
+// Poll the connected-device list (server-side `adb devices`) and reconcile the
+// dropdown: add newly connected devices, drop ones that vanished — but never the
+// current selection or a device with a live session. When the list goes from empty
+// to non-empty, auto-select the first device.
+let _deviceListInterval = null;
+async function syncDeviceList(initial) {
+  let devices;
+  try {
+    devices = await (await fetch(`${API_BASE}/api/all_connected_devices?session=${session_token}`)).json();
+  } catch (e) { return; }
+  if (!Array.isArray(devices)) return;
+
+  const sel = document.getElementById("device");
+  const incoming = new Set(devices);
+  const existing = new Set([...sel.options].map(o => o.value));
+  const wasEmpty = existing.size === 0;
+
+  devices.forEach(id => {
+    if (!existing.has(id)) {
+      const opt = document.createElement("option");
+      opt.value = id;
+      opt.textContent = id;
+      sel.appendChild(opt);
+      if (!initial) console.log("🔌 Device connected:", id);
+    }
+  });
+
+  const liveDevice = (aiLivePoll || window.telemetryInterval) ? _lastDeviceValue : null;
+  [...sel.options].forEach(o => {
+    if (!incoming.has(o.value) && o.value !== sel.value && o.value !== liveDevice) {
+      o.remove();
+    }
+  });
+
+  showNoDeviceUI(sel.options.length === 0);
+
+  if (wasEmpty && sel.options.length > 0) {
+    sel.value = sel.options[0].value;
+    handleDeviceSelection();
+    setTimeout(updateConsoleLog, 500);
+  }
 }
 
 

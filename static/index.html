@@ -187,6 +187,17 @@
             <div id="console-modal-header" class="modal-header">Console<span class="modal-close" onclick="closeConsoleModal()">×</span></div>
             <pre id="console-full" class="console-body"></pre>
         </div>
+        <div id="save-choice-modal" class="modal-overlay">
+            <div class="modal-content" style="top: 30%; left: 50%; transform: translateX(-50%); text-align: center;">
+                <div style="font-weight: bold; font-size: 16px; margin-bottom: 10px;">Save a snapshot?</div>
+                <div style="margin-bottom: 16px;">Save a snapshot of this session before disconnecting?</div>
+                <div style="display: flex; gap: 12px; justify-content: center;">
+                    <button type="button" onclick="resolveSaveChoice('save')">Save</button>
+                    <button type="button" onclick="resolveSaveChoice('discard')">Discard</button>
+                    <button type="button" onclick="resolveSaveChoice('cancel')">Cancel</button>
+                </div>
+            </div>
+        </div>
         <div id="wireless-modal" class="modal-overlay">
             <div class="modal-content"></div>
         </div>

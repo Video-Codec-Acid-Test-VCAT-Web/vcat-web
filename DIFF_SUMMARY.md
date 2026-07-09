@@ -308,11 +308,18 @@ per device, one app at a time.
 
 - **Reset button + modal removed** (`btn_reset_telemetry`, `#reset-modal`, and
   `openResetModal`/`confirmReset`/`closeResetModal`). `resetTelemetry()` is now unused.
-- **Disconnect = confirm → offer snapshot → terminate** via `confirmTerminateSession()`
-  (two native dialogs: confirm the disconnect, then "save a snapshot?"; a failed save keeps
-  the session so nothing is lost). Wired to both app Disconnect buttons
-  (`handleDisconnectClick`, `promptAiDisconnect`); the actual teardown is still
-  `stopCurrentLiveSession()`.
+- **Disconnect = confirm → offer snapshot → terminate** via `confirmTerminateSession()`.
+  First a native confirm ("Disconnect …?"), then a 3-button styled modal
+  (`#save-choice-modal`, `askSaveChoice()`/`resolveSaveChoice()`): **Save / Discard /
+  Cancel** — Cancel is the last chance to abort the disconnect; a failed Save keeps the
+  session so nothing is lost. Wired to both app Disconnect buttons (`handleDisconnectClick`,
+  `promptAiDisconnect`); the actual teardown is still `stopCurrentLiveSession()`.
+- **Hot-plug device polling**: `syncDeviceList()` polls `/api/all_connected_devices` every
+  5 s (`_deviceListInterval`) and reconciles the dropdown — adds newly connected devices,
+  removes vanished ones (never the current selection or a live-session device), and
+  auto-selects the first when the list goes from empty to non-empty. `populateDeviceDropdown`
+  now does the initial `syncDeviceList(true)` then starts the interval; `showNoDeviceUI()`
+  toggles the overlay.
 - **Changing the device while live** runs the same confirm/save/terminate against the
   *old* device, then commits the switch; Cancel (or a failed save) reverts the dropdown to
   the previous device (`handleDeviceSelection`, `_lastDeviceValue`).
