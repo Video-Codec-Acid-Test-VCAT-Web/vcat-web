@@ -13,9 +13,16 @@ scrollable vcat-ai Test Details, Grid/Focus view modes, and logo/background them
 exclusive with vcat-d; and (F) **live charts read from the log file** for both apps
 (frame-drops API removed; mixed CPU chart = log total + polled per-core); and
 (G) **save/load session snapshots** — snapshot a live session to a CSV (with per-core CPU)
-and reopen any session CSV without a device.
+and reopen any session CSV without a device; and (H/I/J) **resilience & session control** —
+device-disconnect/crash recovery, a Connect/Disconnect-only model, and a snapshot CPU/GPU
+round-trip fix; and (K) **usable with no device attached** — open local files, same-origin
+API, content-based app detection; and (L) **unit consistency** — memory in KB, battery in
+percent; and (M) **log-format compatibility** with vcat-d ≥ 3006 (object `playlist`,
+`execution_id`); and (N) **result comparison** — N logs side by side, one row per metric;
+and (O) **exports** — PDF report and per-hour `.xlsx` from any view.
 (A/B → `4fa2a5b`; C → `237b96a`; D → `61898ff`; E → `038ea4a`; F → `233d5d3`;
-G is the current change.)
+G → `72f3786` (+ `1acbfdb`); H → `5ff0c88`/`36cfcd3`; I → `072d296`; J → `d4a15aa`;
+K–P are the current change.)
 
 ---
 
@@ -351,6 +358,181 @@ the round-trip:
 Snapshots taken *before* this fix still lack per-core CPU and carry the old
 `cpu.usage.total`; GPU now round-trips for them, but full CPU requires a fresh capture.
 
+## K. Open local files without a device
+
+vcat_web was effectively unusable with nothing attached: the load path existed but was
+unreachable/unstable.
+
+### `static/main.js`
+- **`API_BASE = window.location.origin`** (was a hard-coded `http://localhost:5050`), so
+  `--host`/`--port` actually work. Under a custom port every request went cross-origin to a
+  dead address — no session token, no devices, nothing.
+- **`openedFileTabs`** (a `Set` of tabs opened from a file) + `showNoDeviceUI()` now only
+  hides the UI when that set is empty. The 5 s `syncDeviceList()` poll called
+  `showNoDeviceUI(true)` whenever `adb devices` was empty, which hid `#tab-header` /
+  `#tab-content` — a locally-opened log vanished seconds after loading.
+- `reportFileLoadFailure(tabId, message, fileName)`: a load that fails now alerts with the
+  reason and removes the empty tab. Both file paths previously `console.error`'d and left a
+  blank tab (this is what surfaced the `playlist`-object bug in § M).
+- `closeTelemetryTab()` looked up `getElementById(tabId)` instead of `` `${tabId}-tab` ``, so
+  closing a tab leaked its pane into the DOM.
+- App type comes from the server (§ below) rather than `name.includes("vcatai")`.
+
+### `vcat_telemetry.py`
+- `_uploads_dir()`: browsed files stage in a temp dir. `upload_session` previously wrote into
+  `~/Downloads`, so opening `~/Desktop/logs.csv` silently overwrote an unrelated
+  `~/Downloads/logs.csv`.
+- `_resolve_saved_file(name)`: resolves by name across the uploads dir then the saved-sessions
+  dir (still `basename`-guarded).
+- `_detect_app_from_file(path, fallback_name)`: vcat-d vs vcat-ai from the CSV column header
+  (`_AI_ONLY_COLUMNS` — the `transform.*` series only vcat-ai logs carry), capped at
+  `_HEADER_SCAN_LINES`. Filename is only a fallback, so a log can be named anything.
+  Used by `load_saved`, `upload_session` (returns the detected `app`) and
+  `telemetry_from_file`.
+
+### `static/index.html`
+- The no-device overlay now offers **Open Local File…** instead of only
+  "connect a device and try again".
+
+---
+
+## L. Unit consistency: memory in KB, battery in %
+
+Two fields meant different things depending on whether the data came from the ADB worker or
+from a log, and both were mislabelled in the UI.
+
+- **Memory.** `/proc/meminfo` and `dumpsys meminfo` report **KB**, but the app logs
+  `test.memory.system` / `test.memory.vcat` in **bytes** (and the reader passed the raw
+  string through). `MemoryEntry.used_kb` is KB, so `vcat_telemetry_reader._bytes_to_kb()`
+  converts (and parses to `int`) on the way in. The chart's `/1024` → MB is now right for
+  loaded logs too; it was showing KB labelled MB (`8,000,000 MB`).
+- **Battery.** The app logs `battery.level` as a **0–1 fraction**; `dumpsys battery` gives
+  **0–100**. `_fraction_to_percent()` scales the logged value, and `chartOptions` pins any
+  percentage axis (`isPercentChart`: CPU *and* Battery) to 0–100.
+- `vcat_telemetry_writer`: the Memory sheet header listed **four** columns
+  (`Total KB, Used KB, App KB`) for the three actually written, so system memory landed under
+  "Total KB" and app memory under "Used KB". Now `Elapsed Time (s), System Used KB,
+  App Used KB`. (`Total` had no source — the worker discards the total.)
+- Removed a dead `appMap` built from `a.app_kb`, a field the API never emits.
+
+---
+
+## M. Log-format compatibility (vcat-d ≥ 3006)
+
+Loading a log from a newer vcat-d failed outright with
+`(fullPath || "").replace is not a function`.
+
+- **Cause.** `session_info.playlist` changed from a string to an object
+  (`{"id": …, "name": "av2-1080p30.xspf"}`). It reached the browser as an object and
+  `getFileName()` threw on the first line of the render, aborting the whole load.
+- `vcat_telemetry_data_models.playlist_ref(value)` → `(name, id)` for **either** shape, with
+  `playlist_name()` on top. Keyed on the **shape, not `header_version`** — a pre-release
+  build was already emitting the object under 3004, so version-gating would have missed it.
+- `SessionInfo` gained `playlist_id` and `execution_id` (both `""` for older logs).
+  `execution_id` is a root-level key, so `parse_json_header()` now returns it as a 5-tuple
+  and `SessionInfo.from_dict(d, execution_id="")` takes it. Both flow into
+  `session_info.to_dict()`, so the Excel SUMMARY sheet records which execution it came from.
+- The **live** path (`fetch_test_details`) goes through the same helper — the device's
+  `/test_details` response carries the same new shape.
+- `getFileName()` coerces with `String()` instead of assuming a string, so the next
+  device-side change degrades to a wrong-looking label rather than killing the load.
+
+Verified across old (string playlist), pre-release (object under 3004), synthetic 3006/3010,
+missing/null playlist, and id-only playlist. No version ceiling anywhere (the only check is
+`header_version < 2`).
+
+---
+
+## N. Result comparison (N logs side by side)
+
+A new comparison tab renders 2+ logs' charts in one grid, **one row per metric**, so
+scrolling walks CPU vs CPU, Frequency vs Frequency, …
+
+### Structure
+- `compareStateByTabId[tabId] = {sources[], sides[], data[]}`; each side is a normal
+  telemetry pane built under its own tabId prefix (`<cmp>-A`, `-B`, `-C`, …), so every
+  existing `update*Chart(telemetry, tabId)` and `chartsByTabId` lookup works unchanged.
+- `renderFileTelemetry(tabId, app, data)` was extracted from the two file-load paths and is
+  now shared by them *and* by each comparison column — a compared pane is built by exactly
+  the same code as a standalone one.
+- `buildCompareSide()` clones the telemetry template into `.cmp-staging` (absolute, 0×0,
+  `overflow:hidden`) so canvases get a real width before being moved;
+  `interleaveCompareGrid()` then groups the wrappers by `<h3>` title into the shared grid
+  (placeholder cell if a log lacks a metric). Per-side toolbars, Focus containers and
+  player controls are stripped (Play/Stop act on the live device).
+- **Compare To…** picks another log (device-file modal or local browse). On a single-log tab
+  it starts a comparison; on a comparison tab it **appends a column**, handing over the
+  already-loaded payloads so only the new log is read, and retires the tab it grew out of.
+- Cross-app pairs are refused (vcat-d vs vcat-ai record different metrics).
+
+### Layout
+- `applyCompareColumns()` sets `repeat(N, minmax(COMPARE_MIN_COL_PX, 1fr))` (420 px) on both
+  the grid and the sticky header bar, so beyond ~3 logs it **scrolls horizontally** with the
+  columns and their headers staying aligned.
+- The pane scrolls internally (`.compare-scroll`, sized by `sizeCompareAreas()`): a global
+  `html, body { overflow-y: auto }` means a sticky header in the document flow never pins.
+  Column headers live in their own sticky bar because a sticky *grid item* is confined to its
+  own row.
+- **Align axes** (default on): `applyCompareAlignment(sides, on)` gives every column of a
+  metric one shared x/y range; off restores each chart's own scaling (`_cmpOwnScale`).
+  `rescaleNormalized()` handles the Temperature chart, whose thermal series is normalized
+  against its own y max and so must be rescaled with the axis, not just widened.
+
+---
+
+## O. Exports: PDF and spreadsheet
+
+Both are available on a **single-log** panel and on a comparison, driven by one
+`exportContextFor(tabId)` that returns `{sources, sides, data}` for either.
+
+### PDF (`jsPDF` UMD, same CDN as Chart.js)
+- Cover page: a matrix — field labels down the left, one column per run (codec, input
+  resolution/frame rate, decoder, device, SoC vendor/name, Android, vcat version, playlist,
+  duration, execution id, log file) from the shared `runFieldRows()`.
+- Then one row per metric, one column per log, exported from the live canvases (so the
+  shared axes are whatever is on screen). `pdfActivateFinalTooltip()` parks each chart's
+  tooltip on its **last sample** before rasterising, so end-of-run values are readable
+  without the axes; it's restored in a `finally` so no tooltip is left stuck on screen.
+- **Size**: was ~22 MB. Three causes, all fixed — `compress: true` (jsPDF wrote page streams
+  raw), a re-rasterise capped at `PDF_IMG_WIDTH` 900 px (a retina canvas has a 2× backing
+  store), and JPEG at `PDF_JPEG_QUALITY` 0.82 instead of PNG for dense line art. Now
+  ~230–310 KB with the charts still crisp.
+- **`PDF_MAX_COLUMNS = 2`**: past two logs the columns are too narrow to read, so the button
+  disables itself (with an explanatory tooltip) and `exportTabPdf()` refuses. Use the
+  spreadsheet for more.
+
+### Spreadsheet (`.xlsx`, openpyxl — already a dependency)
+- `POST /api/vcat_monitor/comparison_workbook` → `write_comparison_workbook()`. The client
+  resamples and posts the ~20-row table, so nothing is re-read and it works for
+  device-sourced and local logs alike. No device required.
+- Sheet 1: the `runFieldRows()` block in the cells **above** the table, then `Hour` in
+  column A and one column per log, plus a ready-made line chart.
+  Sheet 2 (`About`) records the sampling rule.
+- `buildHourlyTable()`: for each whole hour the reading **nearest that hour mark** within
+  ±30 min (`sampleNearest`), else blank. Hours run to `ceil(longest span)` so the
+  longest-running test sets the axis and its final reading is included — `floor` truncated a
+  5.9 h run to hour 5 and dropped its end state. Trailing rows blank for *every* log are
+  dropped. A shorter log's cells stay **blank, not 0**, which would plot as a drop to zero.
+- `comparisonSeriesLabels()`: columns are identified by **codec** (`video/av02` → `AV02`),
+  not filename. Clashing codecs are separated by the first field that tells them apart
+  (decoder → frame rate → resolution → input file), else `(A)`/`(B)`. `exportStem()` keeps
+  filenames sane for any number of logs.
+
+---
+
+## P. Smaller fixes
+
+- **Tooltip elapsed time**: hover text shows the raw x value *and* a clock form —
+  `18641.241 (5:10:41.241)` — via `formatElapsedRaw()` / `formatElapsedClock()` and a
+  `plugins.tooltip.callbacks.title` on `chartOptions()`. Resolves x from `parsed.x` with an
+  `item.label` fallback, since some charts use `labels` + numeric arrays and others `{x, y}`.
+- **Test Details clipping**: `.test-video-row input` / `.test-details-top input` had no width
+  rule, so they used the browser default (~20 chars ≈ 129 px) inside a 461 px fieldset —
+  long decoder/file/timestamp strings were cut. Now `flex: 1 1 auto; min-width: 0`, giving
+  335 px in the single view and ~600 px in a comparison column.
+- `run_info` added to both response builders (device, SoC vendor/name, Android, vcat version,
+  playlist + id, execution id) — the metadata source for both exports.
+
 ## ⚠️ Notes before pushing
 
 - **Debug timing values** are currently in place and should likely be reverted:
@@ -368,3 +550,13 @@ Snapshots taken *before* this fix still lack per-core CPU and carry the old
   unused for listings (superseded by the scan) — left in place, safe to remove.
 - **`transform.inference_cpu_time`** older logs stored tiny values (non-ns); newer logs use
   ns. Missing/unparseable values render as 0.
+- **PDF is capped at two logs** (`PDF_MAX_COLUMNS`); the spreadsheet has no limit.
+- **`chartOptions()` is declared twice** in `static/main.js` and the **second** declaration
+  is the effective one. Edits to the first have no effect — it should be deleted.
+- **Exports need a loaded payload**, so they are disabled on the **live** tab (same rule as
+  Compare To); snapshot first.
+- **Excel/`.xlsx` produced before § L** carry memory in bytes and battery as a 0–1 fraction.
+- **Focus-mode filmstrip thumbnails** still clip Test Details text (a 150 px-tall preview
+  with `overflow: hidden`); § P improved but did not eliminate the overhang.
+- **PDF charts keep the app's dark theme** (the card colour is painted behind each
+  transparent canvas). A light-theme export would need the charts re-rendered.

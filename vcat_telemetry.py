@@ -454,7 +454,7 @@ def get_test_details(session_id, device_id: str) -> TestDetails:
         video = data.get("currentTestVideo") or {}
 
         return TestDetails(
-            playlist=data.get("playlist", ""),
+            playlist=playlist_name(data.get("playlist", "")),
             startTime=data.get("startTime", ""),
             testState=data.get("testState", "Unknown"),
             currentTestVideo=CurrentTestVideo(
@@ -1616,6 +1616,28 @@ from dataclasses import asdict
 from datetime import datetime
 
 
+def _run_info(telemetry) -> dict:
+    """Who/what/which-run metadata for a telemetry payload — identifies a result
+    in a report header. Empty-ish for live sessions, which have no parsed header."""
+    di = getattr(telemetry, "device_info", None)
+    si = getattr(telemetry, "session_info", None)
+    soc = " ".join(
+        x for x in (getattr(di, "soc_manufacturer", ""), getattr(di, "soc", "")) if x
+    )
+    return {
+        "manufacturer": getattr(di, "manufacturer", "") or "",
+        "model": getattr(di, "model", "") or "",
+        "soc": soc,
+        "soc_manufacturer": getattr(di, "soc_manufacturer", "") or "",
+        "soc_model": getattr(di, "soc", "") or "",
+        "android_version": getattr(di, "android_version", "") or "",
+        "vcat_version": getattr(si, "vcat_version", "") or "",
+        "playlist": getattr(si, "playlist", "") or "",
+        "playlist_id": getattr(si, "playlist_id", "") or "",
+        "execution_id": getattr(si, "execution_id", "") or "",
+    }
+
+
 def build_ai_telemetry_response(telemetry, device_id: str) -> dict:
     """Response for vcat-ai telemetry (VcataiTelemetryData): common series
     (no frame drops) plus the AI processing-time series."""
@@ -1629,6 +1651,7 @@ def build_ai_telemetry_response(telemetry, device_id: str) -> dict:
         "timestamp": datetime.now().isoformat(),
         "device_id": device_id,
         "test_details": asdict(telemetry.test_details),
+        "run_info": _run_info(telemetry),
         # Raw vcat-ai test object (name/id/createdAt/testCases[...]) for the panel.
         "ai_test": telemetry.session_info.test,
         "telemetry_data": {
@@ -1680,6 +1703,7 @@ def build_telemetry_response(telemetry, device_id: str) -> dict:
         "timestamp": datetime.now().isoformat(),
         "device_id": device_id,
         "test_details": asdict(telemetry.test_details),
+        "run_info": _run_info(telemetry),
         "telemetry_data": {
             "battery": [
                 {"elapsed_time": entry.elapsed_time, "level": entry.level}
@@ -1776,6 +1800,53 @@ def _sessions_dir() -> str:
     d = os.path.expanduser("~/Downloads")
     os.makedirs(d, exist_ok=True)
     return d
+
+
+def _uploads_dir() -> str:
+    """Staging area for files the user browsed to via Open Local File. Kept out of
+    ~/Downloads so an upload never overwrites an unrelated same-named file there;
+    the original stays wherever the user picked it from."""
+    d = os.path.join(tempfile.gettempdir(), "vcat_opened")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def _resolve_saved_file(name: str) -> Optional[str]:
+    """Resolve a session file by name, looking in the browsed-uploads staging dir
+    first and then the saved-sessions dir. basename() guards path traversal."""
+    base = os.path.basename(name or "")
+    if not base:
+        return None
+    for d in (_uploads_dir(), _sessions_dir()):
+        path = os.path.join(d, base)
+        if os.path.isfile(path):
+            return path
+    return None
+
+
+# Columns only vcat-ai logs carry (the AI reader parses these per row) — used to
+# tell the two log formats apart by content rather than by filename, since a file
+# the user browsed to can be named anything.
+_AI_ONLY_COLUMNS = frozenset({
+    "transform.frame_proc_time_ns",
+    "transform.inference_time_ns",
+    "video.ai.transform",
+})
+_HEADER_SCAN_LINES = 500  # the column header sits just past the JSON preamble
+
+
+def _detect_app_from_file(path: str, fallback_name: str = "") -> str:
+    """Return "vcat_ai" or "vcat_d" for a telemetry CSV, by inspecting its column
+    header. Falls back to the filename heuristic if the header can't be read."""
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            for _, line in zip(range(_HEADER_SCAN_LINES), f):
+                if line.startswith("test.timestamp"):
+                    cols = {c.strip() for c in line.split(",")}
+                    return "vcat_ai" if cols & _AI_ONLY_COLUMNS else "vcat_d"
+    except Exception as e:
+        logger.warning(f"app detection failed for {path}: {e}")
+    return "vcat_ai" if "vcatai" in os.path.basename(fallback_name or path) else "vcat_d"
 
 
 # Per-device live-session temp file (the running merged CSV), append state, throttle.
@@ -2104,14 +2175,64 @@ def api_saved_sessions(session_id):
 @app.route("/api/vcat_monitor/upload_session", methods=["POST"])
 @require_valid_session
 def api_upload_session(session_id):
-    """Receive a browsed CSV, store it in the sessions dir, return its name so it
-    can be opened via load_saved. No device required."""
+    """Receive a browsed CSV, stage it host-side, and return its name plus the
+    detected app so it can be opened via load_saved. No device required."""
     f = request.files.get("file")
     if not f or not f.filename:
         return jsonify({"status": "error", "message": "No file provided"}), 400
     name = os.path.basename(f.filename)
-    f.save(os.path.join(_sessions_dir(), name))
-    return jsonify({"status": "ok", "name": name})
+    path = os.path.join(_uploads_dir(), name)
+    f.save(path)
+    return jsonify({"status": "ok", "name": name, "app": _detect_app_from_file(path, name)})
+
+
+@app.route("/api/vcat_monitor/comparison_workbook", methods=["POST"])
+@require_valid_session
+def api_comparison_workbook(session_id):
+    """Turn a comparison's per-hour table into an .xlsx. The client sends the
+    already-resampled table (a couple of dozen rows), so this neither re-reads the
+    logs nor needs the device. No device required."""
+    body = request.get_json(silent=True) or {}
+    labels = [str(x) for x in (body.get("series_labels") or [])]
+    rows = body.get("rows") or []
+    metric = str(body.get("metric") or "Comparison")
+    unit = str(body.get("unit") or "")
+
+    if not labels or not rows:
+        return jsonify({"status": "error", "message": "No table data provided"}), 400
+
+    def cell(v):
+        if v is None or v == "":
+            return None
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return None
+
+    table = [[cell(r[0])] + [cell(v) for v in r[1:]] for r in rows if r]
+
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as tf:
+            out_path = tf.name
+        write_comparison_workbook(
+            out_path,
+            metric,
+            unit,
+            labels,
+            table,
+            body.get("notes") or [],
+            body.get("info_rows") or [],
+        )
+        name_root = re.sub(r"[^A-Za-z0-9._-]", "_", str(body.get("name") or "comparison"))
+        return send_file(
+            out_path,
+            mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            as_attachment=True,
+            download_name=f"{name_root}.xlsx",
+        )
+    except Exception as e:
+        logger.error(f"comparison_workbook failed: {e}")
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 
 @app.route("/api/vcat_monitor/load_saved", methods=["GET"])
@@ -2125,11 +2246,11 @@ def api_load_saved(session_id):
     if not name:
         return jsonify({"status": "error", "message": "Missing name"}), 400
 
-    local_path = os.path.join(_sessions_dir(), os.path.basename(name))
-    if not os.path.isfile(local_path):
+    local_path = _resolve_saved_file(name)
+    if not local_path:
         return jsonify({"status": "error", "message": "Saved session not found"}), 404
 
-    app = request.args.get("app") or ("vcat_ai" if "vcatai" in os.path.basename(name) else "vcat_d")
+    app = request.args.get("app") or _detect_app_from_file(local_path, name)
     try:
         if app == "vcat_ai":
             telemetry = read_ai_telemetry_data(session_id, local_path)
@@ -2167,9 +2288,9 @@ def api_telemetry_from_file(session_id, device_id):
 
     try:
         if request.args.get("saved") == "1":
-            # Host-side saved session (output/sessions/); basename guards traversal.
-            local_path = os.path.join(_sessions_dir(), os.path.basename(device_file_path))
-            if not os.path.isfile(local_path):
+            # Host-side saved session (browsed upload or saved snapshot).
+            local_path = _resolve_saved_file(device_file_path)
+            if not local_path:
                 return jsonify({"status": "error", "message": "Saved session not found"}), 404
         else:
             local_path = get_device_file(
@@ -2179,9 +2300,7 @@ def api_telemetry_from_file(session_id, device_id):
                 force_temp=True,  # ignore caller's destination
             )
 
-        app = request.args.get("app")
-        if not app:
-            app = "vcat_ai" if "vcatai" in os.path.basename(device_file_path) else "vcat_d"
+        app = request.args.get("app") or _detect_app_from_file(local_path, device_file_path)
 
         if app == "vcat_ai":
             telemetry = read_ai_telemetry_data(session_id, local_path)

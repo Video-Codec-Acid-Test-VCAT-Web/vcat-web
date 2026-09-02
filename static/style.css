@@ -306,6 +306,8 @@ fieldset.current-test-video input {
     background: black;
     color: white;
     border: none;
+    flex: 1 1 auto;
+    min-width: 0;
     padding: 4px 8px;
 }
 
@@ -345,13 +347,18 @@ fieldset.current-test-video input {
     line-height: 1;    /* collapse line height */
 }
 
-/* 3) Shrink input padding to the bare minimum */
+/* 3) Shrink input padding to the bare minimum, and let the value use the width the
+      card actually has — the browser default is ~20 characters, which clipped
+      longer decoder/file/timestamp strings even with room to spare. */
 .test-video-row input {
     padding: 1px 2px;  /* tiny padding so text isn’t cut off */
     font-size: 12px;   /* keep your font size */
     background: black;
     color: white;
     border: none;
+    flex: 1 1 auto;
+    min-width: 0;      /* allow shrinking in a narrow card instead of overflowing */
+    width: auto;
 }
 
 /* 4) Label sizing (if you want them even closer to inputs) */
@@ -763,3 +770,149 @@ html, body {
 
 
 
+
+/* ---- Compare To combo (telemetry toolbar, next to Grid / Focus) ---- */
+.compare-select {
+  margin-left: 14px;
+  padding: 5px 8px;
+  background: #333;
+  color: #ddd;
+  border: 1px solid #888;
+  border-radius: 6px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.compare-select:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* ---- Comparison layout: one grid row per metric, side A left, side B right ---- */
+.compare-toolbar .compare-title {
+  color: #fff;
+  font-weight: bold;
+  font-family: monospace;
+  font-size: 14px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.compare-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  padding: 0 10px 10px;
+  box-sizing: border-box;
+}
+
+/* The comparison scrolls inside its own pane (see sizeCompareAreas). Columns have a
+   floor width, so beyond about three logs it scrolls sideways too. */
+.compare-scroll {
+  overflow-y: auto;
+  overflow-x: auto;
+  box-sizing: border-box;
+}
+
+/* Pinned above the grid so the column a chart belongs to stays identifiable
+   however far down the pairs you scroll. */
+.compare-heads {
+  position: sticky;
+  top: 0;
+  z-index: 6;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  padding: 6px 10px 0;
+  background: #111;
+  box-sizing: border-box;
+}
+
+.cmp-col-head {
+  background: #1a1a1a;
+  color: #fff;
+  padding: 8px 12px;
+  border-bottom: 2px solid #0a7;
+  border-radius: 8px 8px 0 0;
+  font-family: monospace;
+  font-size: 13px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.cmp-col-tag {
+  display: inline-block;
+  min-width: 18px;
+  margin-right: 6px;
+  padding: 0 5px;
+  background: #0a7;
+  border-radius: 4px;
+  font-weight: bold;
+  text-align: center;
+}
+
+.cmp-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #1b1b1b;
+  border: 1px dashed #555;
+  color: #888;
+  font-size: 13px;
+  text-align: center;
+}
+
+/* Charts are created here so the canvases get a real width, then moved into the
+   grid. Zero-sized and clipped, so it never affects layout or scrollbars. */
+.cmp-staging {
+  position: absolute;
+  width: 0;
+  height: 0;
+  overflow: hidden;
+}
+
+.cmp-side {
+  width: 760px;
+}
+
+.compare-pane {
+  position: relative;
+}
+
+.cmp-align {
+  color: #ddd;
+  font-size: 13px;
+  margin-right: 6px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.cmp-align input {
+  vertical-align: middle;
+  margin-right: 4px;
+  cursor: pointer;
+}
+
+.cmp-pdf-btn {
+  margin-right: 12px;
+  padding: 5px 10px;
+  background: #333;
+  color: #ddd;
+  border: 1px solid #888;
+  border-radius: 6px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.cmp-pdf-btn:hover:not(:disabled) {
+  background: #0a7;
+  border-color: #0a7;
+  color: #fff;
+}
+
+.cmp-pdf-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}

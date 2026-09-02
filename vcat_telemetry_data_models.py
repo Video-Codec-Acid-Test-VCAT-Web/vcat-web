@@ -39,7 +39,7 @@ from collections import OrderedDict
 from typing import cast
 
 from dataclasses import dataclass, field
-from typing import Dict, Generic, List, Optional, OrderedDict, TypeVar, Union
+from typing import Dict, Generic, List, Optional, OrderedDict, Tuple, TypeVar, Union
 
 
 __all__ = [
@@ -57,6 +57,8 @@ __all__ = [
     "MemoryEntry",
     "MemoryInfo",
     "parse_device_info",
+    "playlist_name",
+    "playlist_ref",
     "ProcTimeNs",
     "SessionInfo",
     "VcatdTelemetryData",
@@ -365,9 +367,33 @@ class StartTime:
         )
 
 
+def playlist_ref(value) -> Tuple[str, str]:
+    """A playlist field as (name, id), in either log format.
+
+    vcat-d <= 3004 logs/reports `playlist` as a plain filename; 3006 and later send
+    an object ({"id": ..., "name": "av2-1080p30.xspf"}). Both are accepted, keyed on
+    the shape rather than header_version — a pre-release build was already emitting
+    the object under 3004, so version-gating would miss it. Older logs simply have
+    no id.
+    """
+    if isinstance(value, dict):
+        return str(value.get("name") or ""), str(value.get("id") or "")
+    return ("" if value is None else str(value)), ""
+
+
+def playlist_name(value) -> str:
+    """Playlist as a display name (falls back to the id if that is all there is)."""
+    name, pid = playlist_ref(value)
+    return name or pid
+
+
 @dataclass
 class SessionInfo:
     playlist: str = ""
+    # Identify the exact run. Both are empty for logs written before vcat-d 3006:
+    # playlist_id comes from the playlist object, execution_id from the log root.
+    playlist_id: str = ""
+    execution_id: str = ""
     vcat_version: str = ""
     battery: SessionBatteryInfo = field(default_factory=SessionBatteryInfo)
     start_time: StartTime = field(default_factory=StartTime)
@@ -376,9 +402,14 @@ class SessionInfo:
     test: dict = field(default_factory=dict)
 
     @staticmethod
-    def from_dict(d: dict) -> "SessionInfo":
+    def from_dict(d: dict, execution_id: str = "") -> "SessionInfo":
+        # execution_id sits at the log root, not inside session_info, so it is
+        # passed in; it defaults empty for logs that predate it.
+        name, playlist_id = playlist_ref(d.get("playlist", ""))
         return SessionInfo(
-            playlist=d.get("playlist", ""),
+            playlist=name or playlist_id,
+            playlist_id=playlist_id,
+            execution_id=execution_id or "",
             vcat_version=d.get("vcat_version", ""),
             battery=SessionBatteryInfo.from_dict(d.get("battery", {})),
             start_time=StartTime.from_dict(d.get("start_time", {})),
@@ -388,6 +419,8 @@ class SessionInfo:
     def to_dict(self) -> dict:
         return {
             "playlist": self.playlist,
+            "playlist_id": self.playlist_id,
+            "execution_id": self.execution_id,
             "vcat_version": self.vcat_version,
             "battery": {
                 "capacity_ma": self.battery.capacity_ma,

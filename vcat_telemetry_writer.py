@@ -42,6 +42,8 @@ from enum import Enum
 from typing import Any, cast, Dict, List
 
 from openpyxl import __version__, Workbook
+from openpyxl.styles import Font
+from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.worksheet import Worksheet
 
 
@@ -57,6 +59,7 @@ __all__ = [
     "create_telemetry_excel",
     "TelemetrySheet",
     "export_telemetry",
+    "write_comparison_workbook",
 ]
 
 
@@ -304,7 +307,7 @@ def create_telemetry_excel_at_path(
         ["Elapsed Time (s)", "Delta Frame Drops"]
     )
     wb[TelemetrySheet.MEMORY.value].append(
-        ["Elapsed Time (s)", "Total KB", "Used KB", "App KB"]
+        ["Elapsed Time (s)", "System Used KB", "App Used KB"]
     )
     wb[TelemetrySheet.GPU_FRAME_STATS.value].append(
         ["Elapsed Time (s)", "New Frames", "Avg GPU ms", "Max GPU ms", "Janky Frames", "p50 ms", "p90 ms", "p95 ms", "p99 ms"]
@@ -353,3 +356,79 @@ def cleanup_all_workbooks():
 
 
 atexit.register(cleanup_all_workbooks)
+
+
+def write_comparison_workbook(
+    out_path: str,
+    metric: str,
+    unit: str,
+    series_labels: List[str],
+    rows: List[List[Any]],
+    notes: List[str] = None,
+    info_rows: List[List[Any]] = None,
+) -> str:
+    """Write a per-hour comparison table, laid out so it can be charted directly.
+
+    Above the table sits a small block describing each run (codec, input format,
+    device, SoC), one column per series so it lines up with the data underneath.
+    The table itself is a plain rectangular range — hour in column A, one series per
+    following column — with the series labels on its header row so a chart picks
+    them up as its legend. Missing samples are left as empty cells rather than 0,
+    which would otherwise plot as a drop to zero.
+    """
+    from openpyxl.chart import LineChart, Reference
+
+    wb = Workbook()
+    ws = cast(Worksheet, wb.active)
+    ws.title = metric[:31] or "Comparison"
+
+    title = ws.cell(row=1, column=1, value=f"{metric} — per-hour comparison")
+    title.font = Font(bold=True, size=13)
+
+    row_at = 3
+    for label, *values in info_rows or []:
+        cell = ws.cell(row=row_at, column=1, value=label)
+        cell.font = Font(bold=True)
+        for i, v in enumerate(values):
+            ws.cell(row=row_at, column=2 + i, value=v)
+        row_at += 1
+
+    table_row = row_at + 1 if info_rows else row_at
+    for i, label in enumerate(["Hour"] + list(series_labels)):
+        cell = ws.cell(row=table_row, column=1 + i, value=label)
+        cell.font = Font(bold=True)
+
+    for offset, row in enumerate(rows, start=1):
+        ws.cell(row=table_row + offset, column=1, value=row[0])
+        for i, v in enumerate(row[1:]):
+            if v is not None:
+                ws.cell(row=table_row + offset, column=2 + i, value=v)
+
+    ws.column_dimensions["A"].width = 20
+    for i in range(len(series_labels)):
+        ws.column_dimensions[get_column_letter(2 + i)].width = 30
+
+    if len(rows) >= 2:
+        chart = LineChart()
+        chart.title = f"{metric} by hour"
+        chart.y_axis.title = unit or metric
+        chart.x_axis.title = "Elapsed time (hours)"
+        chart.height = 10
+        chart.width = 24
+        data = Reference(ws, min_col=2, max_col=1 + len(series_labels),
+                         min_row=table_row, max_row=table_row + len(rows))
+        cats = Reference(ws, min_col=1, min_row=table_row + 1,
+                         max_row=table_row + len(rows))
+        chart.add_data(data, titles_from_data=True)
+        chart.set_categories(cats)
+        ws.add_chart(chart, f"{get_column_letter(3 + len(series_labels))}{table_row}")
+
+    if notes:
+        info = wb.create_sheet("About")
+        for line in notes:
+            info.append([line])
+        info.column_dimensions["A"].width = 110
+
+    wb.save(out_path)
+    logger.info(f"📁 Wrote comparison workbook: {out_path}")
+    return out_path

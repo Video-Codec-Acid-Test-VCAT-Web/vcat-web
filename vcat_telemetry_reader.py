@@ -48,26 +48,28 @@ path = "/storage/emulated/0/Download/f720p-p7-crf50-av1-fd2.mp4"
 filename = os.path.basename(path)
 print(filename)
 
-def parse_json_header(preamble_lines: list[str]) -> tuple[int, dict, dict, dict]:
+def parse_json_header(preamble_lines: list[str]) -> tuple[int, dict, dict, dict, str]:
     """
     Parses the entire preamble as a single JSON blob.
-    Returns (header_version, device_info, session_info, test_conditions).
+    Returns (header_version, device_info, session_info, test_conditions, execution_id).
+    execution_id is a root-level key added in vcat-d 3006; "" for older logs.
     If no 'header_version' is present, treats it as invalid.
     """
     try:
         raw_json = json.loads("".join(preamble_lines))
         if "header_version" not in raw_json:
-            return 0, {}, {}, {}
+            return 0, {}, {}, {}, ""
 
         return (
             raw_json.get("header_version", 0),
             raw_json.get("device_info", {}),
             raw_json.get("session_info", {}),
             raw_json.get("test_conditions", {}),
+            str(raw_json.get("execution_id") or ""),
         )
     except Exception as e:
         print(f"[warn] Failed to parse JSON header: {e}")
-        return 0, {}, {}, {}
+        return 0, {}, {}, {}, ""
 
 def _read_telemetry_dicts(file_path: str) -> tuple[list[dict], int, DeviceInfo, SessionInfo, TestConditions]:
     with open(file_path, "r", encoding="utf-8") as f:
@@ -82,10 +84,12 @@ def _read_telemetry_dicts(file_path: str) -> tuple[list[dict], int, DeviceInfo, 
             break
         preamble_lines.append(line)
 
-    header_version, device_raw, session_raw, test_raw = parse_json_header(preamble_lines)
+    header_version, device_raw, session_raw, test_raw, execution_id = parse_json_header(
+        preamble_lines
+    )
 
     device_details = DeviceInfo.from_dict(device_raw)
-    session_info = SessionInfo.from_dict(session_raw)
+    session_info = SessionInfo.from_dict(session_raw, execution_id)
     test_conditions = TestConditions.from_dict(test_raw)
 
     data_lines = lines[data_start_index:]
@@ -108,10 +112,17 @@ def parse_int(value) -> int:
     return int(float(value))  # Accepts "123.0" as valid
 
 
+# The app logs battery.level as a 0-1 fraction (whole-percent granularity), while
+# the ADB worker reads `dumpsys battery` level:, which is already 0-100.
+# BatteryEntry.level is a percentage, so scale the logged fraction on the way in.
+def _fraction_to_percent(value) -> float:
+    return round(parse_float(value) * 100, 2)
+
+
 def _read_battery_row(elapsed_time: float, row: dict) -> BatteryEntry:
     return BatteryEntry(
         elapsed_time=elapsed_time,
-        level=parse_float(row.get("battery.level")),
+        level=_fraction_to_percent(row.get("battery.level")),
         current_ma=parse_float(row.get("battery.milliamps")),
         charge_count=parse_int(row.get("battery.charge_counter")),
         battery_temp=parse_float(row.get("battery.temperature")),
@@ -170,20 +181,27 @@ def _read_frame_drops(elapsed_time: float, row: dict) -> FramedropEntry:
     return FramedropEntry(elapsed_time=elapsed_time, delta_framedrops=parse_int(value))
 
 
-def _read_system_memory(elapsed_time: float, row: dict):
-    value = row.get("test.memory.system")
+# The app logs memory in BYTES, while the ADB worker (/proc/meminfo, dumpsys
+# meminfo) reports KB. MemoryEntry.used_kb is KB, so convert on the way in —
+# otherwise a loaded log plots 1024x low against the same axis a live one does.
+def _bytes_to_kb(value, field: str) -> int:
     if value is None:
-        raise ValueError("Missing 'test.memory.system'")
+        raise ValueError(f"Missing '{field}'")
+    return parse_int(value) // 1024
 
-    return MemoryEntry(elapsed_time=elapsed_time, used_kb=value)
+
+def _read_system_memory(elapsed_time: float, row: dict):
+    return MemoryEntry(
+        elapsed_time=elapsed_time,
+        used_kb=_bytes_to_kb(row.get("test.memory.system"), "test.memory.system"),
+    )
 
 
 def read_app_memory(elapsed_time: float, row: dict):
-    value = row.get("test.memory.vcat")
-    if value is None:
-        raise ValueError("Missing 'test.memory.vcat'")
-
-    return MemoryEntry(elapsed_time=elapsed_time, used_kb=value)
+    return MemoryEntry(
+        elapsed_time=elapsed_time,
+        used_kb=_bytes_to_kb(row.get("test.memory.vcat"), "test.memory.vcat"),
+    )
 
 
 def _read_proc_time_ns(elapsed_time: float, row: dict, key: str) -> ProcTimeNs:

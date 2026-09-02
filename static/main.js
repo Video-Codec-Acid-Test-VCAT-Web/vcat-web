@@ -1,4 +1,6 @@
-const API_BASE = "http://localhost:5050";
+// Same origin as the page — the server may be started on any --host/--port
+// (a hardcoded localhost:5050 broke every request under a custom port).
+const API_BASE = window.location.origin;
 let session_token = null;
 let selectedDevice = null;
 let currentDeviceInfo = null;
@@ -254,7 +256,7 @@ async function handleLoadFile(input) {
       body: fd,
     });
     const data = await res.json();
-    if (data.status === "ok") loadSavedSession(data.name);
+    if (data.status === "ok") loadSavedSession(data.name, data.app);
     else alert(`Load failed: ${data.message || "error"}`);
   } catch (err) {
     console.error("Load failed:", err);
@@ -282,19 +284,34 @@ function ensureAppTab(appId) {
   rail.appendChild(btn);
 }
 
-// Load a saved session (host CSV) — no connected device required. Infers the
-// app from the filename, reveals the UI, and opens the matching viewer.
-function loadSavedSession(name) {
-  if (!name) return;
-  const app = name.includes("vcatai") ? "vcat_ai" : "vcat_d";
+// Tabs opened from a file — a local/saved session or a log pulled off a device.
+// Non-empty means the UI has content worth showing even with no device attached,
+// so the "no device" overlay stays off and the tabs survive a disconnect.
+const openedFileTabs = new Set();
 
-  const overlay = document.getElementById("no-device-overlay");
-  if (overlay) overlay.style.display = "none";
-  const tc = document.getElementById("tab-content"); if (tc) tc.style.display = "block";
-  const th = document.getElementById("tab-header"); if (th) th.style.display = "flex";
+// A file that can't be parsed (wrong CSV, truncated log) used to fail silently and
+// leave an empty tab behind. Tell the user and clean the tab up.
+function reportFileLoadFailure(tabId, message, fileName) {
+  console.error("Failed to load telemetry from file:", fileName, message);
+  document.getElementById(`${tabId}-tab-btn`)?.remove();
+  document.getElementById(`${tabId}-tab`)?.remove();
+  delete chartsByTabId[tabId];
+  delete fileTabPayloads[tabId];
+  openedFileTabs.delete(tabId);
+  if (!document.getElementById("device")?.options.length) showNoDeviceUI(true);
+  alert(`Could not open ${fileName || "this file"}:\n\n${message}`);
+}
+
+// Load a saved session (host CSV) — no connected device required. The app is
+// detected server-side from the file's contents (the filename is only a
+// fallback), so a log can be named anything and still open in the right viewer.
+function loadSavedSession(name, app) {
+  if (!name) return;
+  app = app || (name.includes("vcatai") ? "vcat_ai" : "vcat_d");
 
   ensureAppTab(app);
   showAppTab(app);
+  showNoDeviceUI(false);
 
   if (app === "vcat_ai") openAiLogFile(name, true);
   else handleConnectClick(name, true);
@@ -557,6 +574,7 @@ function handleConnectClick(source, saved = false) {
     const fileName = filePath.split("/").pop();
     tabLabel = fileName;
     tabId = "telemetry-" + fileName.replace(/[^a-zA-Z0-9_-]/g, "-");
+    openedFileTabs.add(tabId);
   }
 
   // Create tab button if needed
@@ -615,13 +633,18 @@ function handleConnectClick(source, saved = false) {
     if (tabButton) tabButton.remove();
 
     // Remove tab content pane
-    const tabPane = document.getElementById(tabId);
+    const tabPane = document.getElementById(`${tabId}-tab`);
     if (tabPane) tabPane.remove();
 
     // Remove associated charts
     if (chartsByTabId[tabId]) {
       delete chartsByTabId[tabId];
     }
+
+    // Last opened file closed with no device attached? Restore the overlay.
+    delete fileTabPayloads[tabId];
+    openedFileTabs.delete(tabId);
+    if (!document.getElementById("device")?.options.length) showNoDeviceUI(true);
 
     // Fallback to device tab if live is closed or none selected
     showTab("device");
@@ -691,24 +714,46 @@ function handleConnectClick(source, saved = false) {
     fetch(url)
         .then(res => res.json())
         .then(data => {
-          const telemetry = data.telemetry_data;
-          const testDetails = data.test_details;
-
-          if (testDetails) {
-            updateTestDetailsUI({ test_details: testDetails },tabId);
+          if (data.status === "error" || !data.telemetry_data) {
+            return reportFileLoadFailure(tabId, data.message || "no telemetry data in file", tabLabel);
           }
-
-          updateCpuChart(telemetry, `${tabId}`, tabId);
-          updateBatteryChart(telemetry, `${tabId}`, tabId);
-          updateFreqChart(telemetry, `${tabId}`, tabId);
-          updateMemoryChart(telemetry, `${tabId}`, tabId);
-          updateFrameDropChart(telemetry, `${tabId}`, tabId);
-          injectTempChart(tabId);
-          updateTempChart(telemetry, tabId);
+          fileTabSources[tabId] = {
+            app: "vcat_d", kind: saved ? "saved" : "device", path: filePath, label: tabLabel,
+          };
+          fileTabPayloads[tabId] = data;
+          enableComparePicker(tabId);
+          renderFileTelemetry(tabId, "vcat_d", data);
+          updateExportButtons(tabId);
         })
         .catch(err => {
-          console.error("❌ Failed to load telemetry from file:", err);
+          reportFileLoadFailure(tabId, err.message || String(err), tabLabel);
         });
+  }
+}
+
+// Draw a whole file-backed telemetry pane (test details + every chart) for one
+// app. Shared by the single-file views and by each side of a comparison, so a
+// compared pane is built from exactly the same code as a standalone one.
+function renderFileTelemetry(tabId, app, data) {
+  const telemetry = data.telemetry_data;
+  if (app === "vcat_ai") {
+    renderAiTestDetails(document.getElementById(`${tabId}-ai-test-details`), data.ai_test);
+    updateCpuChart(telemetry, tabId);
+    updateProcessorChart(telemetry, null, tabId);  // total CPU + GPU from the file
+    updateBatteryChart(telemetry, tabId);
+    updateFreqChart(telemetry, tabId);
+    updateMemoryChart(telemetry, tabId);
+    updateAiProcChart(telemetry, tabId);
+    updateTempChart(telemetry, tabId);
+  } else {
+    if (data.test_details) updateTestDetailsUI({ test_details: data.test_details }, tabId);
+    updateCpuChart(telemetry, tabId);
+    updateBatteryChart(telemetry, tabId);
+    updateFreqChart(telemetry, tabId);
+    updateMemoryChart(telemetry, tabId);
+    updateFrameDropChart(telemetry, tabId);
+    injectTempChart(tabId);
+    updateTempChart(telemetry, tabId);
   }
 }
 
@@ -902,6 +947,29 @@ function handleConsoleOutsideClick(event) {
 function closeConsoleModal() {
   document.getElementById("console-modal").style.display = "none";
   document.removeEventListener("click", handleConsoleOutsideClick);
+}
+
+// Elapsed seconds as h:mm:ss.mmm. Tooltips show the raw value *and* this, because
+// the raw seconds are what the CSV holds while the clock form is what you match
+// against a test log or a video timestamp.
+function formatElapsedClock(seconds) {
+  const n = Number(seconds);
+  if (!Number.isFinite(n)) return "";
+  const totalMs = Math.round(Math.abs(n) * 1000);
+  const h = Math.floor(totalMs / 3600000);
+  const m = Math.floor((totalMs % 3600000) / 60000);
+  const sec = Math.floor((totalMs % 60000) / 1000);
+  const ms = totalMs % 1000;
+  const pad = (v, w) => String(v).padStart(w, "0");
+  return `${n < 0 ? "-" : ""}${h}:${pad(m, 2)}:${pad(sec, 2)}.${pad(ms, 3)}`;
+}
+
+// The x value as logged, without float noise or pointless trailing zeros.
+function formatElapsedRaw(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return String(value);
+  if (Number.isInteger(n)) return String(n);
+  return n.toFixed(3).replace(/0+$/, "").replace(/\.$/, "");
 }
 
 function computeStepSize(latestTime) {
@@ -1098,7 +1166,6 @@ function updateMemoryChart(telemetry, tabId) {
   if (!system.length) return;
 
   const labels = system.map(p => p.elapsed_time);
-  const appMap = Object.fromEntries(app.map(a => [a.elapsed_time, a.app_kb]));
   const stepSize = computeStepSize(labels.at(-1) || 0);
   const systemData = system.map(p => p.used_kb / 1024);
   const appData = app.map(p => p.used_kb / 1024);
@@ -1249,7 +1316,9 @@ function chartOptions(yLabel, latestTime, stepSize) {
 
 function chartOptions(yLabel, latestTime, stepSize) {
     
-  const isCpuChart = yLabel === "CPU Usage (%)";
+  // Axes that are a percentage of a fixed whole get a pinned 0-100 range, so the
+  // shape is read against the full scale (and two runs compare directly).
+  const isPercentChart = yLabel === "CPU Usage (%)" || yLabel === "Battery Level (%)";
   return {
     responsive: true,
     animation: false,
@@ -1275,13 +1344,27 @@ function chartOptions(yLabel, latestTime, stepSize) {
         beginAtZero: true,
         title: { display: true, text: yLabel },
         ticks: { precision: 0 },
-        max: isCpuChart ? 100 : undefined, // ✅ only set max for CPU chart
+        max: isPercentChart ? 100 : undefined,  // CPU % and Battery % are 0-100
       }
     },
     plugins: {
       legend: {
         position: 'bottom',
         labels: { boxWidth: 12, padding: 10 }
+      },
+      tooltip: {
+        callbacks: {
+          // e.g. "18641.241 (5:10:41.241)" instead of the bare seconds.
+          title: (items) => {
+            if (!items || !items.length) return "";
+            const item = items[0];
+            const x = (item.parsed && typeof item.parsed.x === "number")
+              ? item.parsed.x
+              : Number(item.label);
+            if (!Number.isFinite(x)) return item.label ?? "";
+            return `${formatElapsedRaw(x)} (${formatElapsedClock(x)})`;
+          }
+        }
       },
       zoom: false // ✅ completely disable zoom plugin
     }
@@ -1399,7 +1482,10 @@ function handleRunConfigOutsideClick(event) {
  * @returns {string} just the file name (or empty string)
  */
 function getFileName(fullPath) {
-  return (fullPath || "").replace(/^.*[\\/]/, "");
+  if (fullPath === null || fullPath === undefined) return "";
+  // Coerce: a non-string (the device once started sending playlist as an object)
+  // used to throw here and abort the entire file load.
+  return String(fullPath).replace(/^.*[\\/]/, "");
 }
 
 function updateTestDetailsUI(data, tabId) {
@@ -1982,6 +2068,7 @@ function updateTempChart(telemetry, tabId) {
       label: "System Thermal (0–5, norm)", data: sysData,
       borderColor: COLORS[1], backgroundColor: COLORS[1],
       borderWidth: 2, tension: 0.1, pointRadius: 0,
+      normMax: yMax,  // series is normalized against the y max (see alignment below)
     });
   }
 
@@ -2112,6 +2199,7 @@ function openAiLogFile(filePath, saved = false) {
   const deviceId = document.getElementById("device")?.value;
   const fileName = filePath.split("/").pop();
   const tabId = "ai-" + fileName.replace(/[^a-zA-Z0-9_-]/g, "-");
+  openedFileTabs.add(tabId);
 
   if (!document.getElementById(`${tabId}-tab-btn`)) {
     const header = document.getElementById("ai-tab-header");
@@ -2149,23 +2237,27 @@ function openAiLogFile(filePath, saved = false) {
   fetch(url)
     .then(res => res.json())
     .then(data => {
-      const telemetry = data.telemetry_data;
-      renderAiTestDetails(document.getElementById(`${tabId}-ai-test-details`), data.ai_test);
-      updateCpuChart(telemetry, tabId);
-      updateProcessorChart(telemetry, null, tabId);  // total CPU + GPU from the file
-      updateBatteryChart(telemetry, tabId);
-      updateFreqChart(telemetry, tabId);
-      updateMemoryChart(telemetry, tabId);
-      updateAiProcChart(telemetry, tabId);
-      updateTempChart(telemetry, tabId);
+      if (data.status === "error" || !data.telemetry_data) {
+        return reportFileLoadFailure(tabId, data.message || "no telemetry data in file", fileName);
+      }
+      fileTabSources[tabId] = {
+        app: "vcat_ai", kind: saved ? "saved" : "device", path: filePath, label: fileName,
+      };
+      fileTabPayloads[tabId] = data;
+      enableComparePicker(tabId);
+      renderFileTelemetry(tabId, "vcat_ai", data);
+      updateExportButtons(tabId);
     })
-    .catch(err => console.error("Failed to load vcat-ai telemetry:", err));
+    .catch(err => reportFileLoadFailure(tabId, err.message || String(err), fileName));
 }
 
 function closeAiTab(tabId) {
   document.getElementById(`${tabId}-tab-btn`)?.remove();
   document.getElementById(`${tabId}-tab`)?.remove();
   if (chartsByTabId[tabId]) delete chartsByTabId[tabId];
+  delete fileTabPayloads[tabId];
+  openedFileTabs.delete(tabId);
+  if (!document.getElementById("device")?.options.length) showNoDeviceUI(true);
   showAiTab("ai-device");
 }
 
@@ -2255,6 +2347,7 @@ function sizeScrollAreas() {
     const h = window.innerHeight - top - 15;
     el.style.height = `${Math.max(h, 80)}px`;
   });
+  sizeCompareAreas();
 }
 
 window.addEventListener("resize", sizeScrollAreas);
@@ -2407,6 +2500,995 @@ window.addEventListener("resize", () => {
   if (tabId) { sizeFocusAreas(tabId); resizeTabCharts(tabId); }
 });
 
+// ---- Compare two results side by side ----------------------------------------
+// A comparison tab lays two files' charts out in a two-column grid, paired by
+// metric, so scrolling down walks through CPU vs CPU, Frequency vs Frequency and
+// so on. Each side is a normal telemetry pane built under its own tabId prefix
+// (`<cmp>-A` / `<cmp>-B`), so every existing update*Chart(telemetry, tabId) and
+// chartsByTabId lookup works unchanged; the charts are then re-parented into the
+// shared grid the same way Focus mode moves its wrappers.
+
+// What each file-backed tab is showing, so "Compare To" knows what side A is.
+const fileTabSources = {};       // tabId -> {app, kind: "saved"|"device", path, label}
+const fileTabPayloads = {};      // tabId -> the loaded telemetry payload
+const compareStateByTabId = {};  // compare tabId -> {sources[], sides[], data[]}
+
+// Column tag for a run: A, B, C, ...
+function sideTag(i) {
+  return String.fromCharCode(65 + i);
+}
+
+// What the exporters need, for a single-file tab and an N-way comparison alike.
+function exportContextFor(tabId) {
+  const cmp = compareStateByTabId[tabId];
+  if (cmp) {
+    return {
+      tabId, app: cmp.sources[0].app, sources: cmp.sources,
+      sides: cmp.sides, data: cmp.data, comparison: true,
+    };
+  }
+  const src = fileTabSources[tabId];
+  const data = fileTabPayloads[tabId];
+  if (!src || !data) return null;
+  return {
+    tabId, app: src.app, sources: [src],
+    sides: [tabId], data: [data], comparison: false,
+  };
+}
+
+// Toolbar buttons in the shared telemetry template resolve their own tab.
+function exportFromBtn(btn, kind) {
+  const tabId = tabIdFromNode(btn);
+  if (!tabId) return;
+  if (kind === "pdf") exportTabPdf(tabId);
+  else exportTabSpreadsheet(tabId);
+}
+
+// Charts sit side by side across the page in the PDF, so past two logs each column
+// is too narrow to read anything from. The spreadsheet has no such limit.
+const PDF_MAX_COLUMNS = 2;
+
+// Exports need a loaded payload, so they stay off until every column has rendered.
+function updateExportButtons(tabId) {
+  const pane = paneOf(tabId);
+  if (!pane) return;
+  const ctx = exportContextFor(tabId);
+  const ready = !!ctx && !ctx.data.some(d => !d);
+  const columns = ctx ? ctx.sources.length : 0;
+
+  pane.querySelectorAll("[data-export]").forEach(btn => {
+    const tooWide = btn.dataset.export === "pdf" && columns > PDF_MAX_COLUMNS;
+    btn.disabled = !ready || tooWide;
+    if (tooWide) {
+      btn.title =
+        `PDF holds at most ${PDF_MAX_COLUMNS} logs side by side — with ${columns} the ` +
+        `charts are too narrow to read. Save Spreadsheet handles any number.`;
+    }
+  });
+}
+
+function appLabel(app) {
+  return app === "vcat_ai" ? "vcat-ai" : "vcat-d";
+}
+
+// Where an app's telemetry tabs live: vcat-d and vcat-ai have separate headers.
+function tabHost(app) {
+  return app === "vcat_ai"
+    ? { header: "ai-tab-header", content: "ai-tab-content", btnClass: "ai-tab-btn",
+        paneClass: "ai-tab-pane", show: showAiTab, home: "ai-device" }
+    : { header: "tab-header", content: "tab-content", btnClass: "tab-button",
+        paneClass: "tab-pane", show: showTab, home: "device" };
+}
+
+// The Compare To combo is inert until a tab actually has a file behind it (the
+// live tab has nothing to compare — take a snapshot first).
+function enableComparePicker(tabId) {
+  const sel = paneOf(tabId)?.querySelector(".compare-select");
+  if (!sel) return;
+  sel.disabled = false;
+  sel.title = "Compare this result with another file";
+}
+
+function sourcesForTab(tabId) {
+  const cmp = compareStateByTabId[tabId];
+  if (cmp) return cmp.sources;
+  const src = fileTabSources[tabId];
+  return src ? [src] : [];
+}
+
+// Toolbar combo: pick where the other result comes from.
+async function handleCompareSelect(select) {
+  const choice = select.value;
+  select.value = "";  // snap back to the "Compare To…" label
+  if (!choice) return;
+
+  const tabId = tabIdFromNode(select);
+  const base = tabId ? sourcesForTab(tabId) : [];
+  if (!base.length) {
+    return alert("Open a saved or on-device log first, then choose Compare To.");
+  }
+
+  const next = choice === "device"
+    ? await pickDeviceFile(base[0].app)
+    : await pickLocalCompareFile();
+  if (!next) return;  // cancelled
+
+  // From a comparison this appends another column; from a single log it starts one.
+  // Payloads already loaded are handed over so nothing is re-read from disk.
+  const cmp = compareStateByTabId[tabId];
+  const cached = cmp ? cmp.data.slice() : [fileTabPayloads[tabId] || null];
+  const built = await openCompareTab([...base, next], cached);
+  // Adding a column grows the same comparison, so retire the tab it grew out of
+  // (only once the new one is up, in case the added log fails to load).
+  if (built && cmp && built !== tabId) removeCompareTab(tabId);
+}
+
+// --- side B pickers ---
+
+let _localComparePick = null;
+
+function pickLocalCompareFile() {
+  const input = document.getElementById("compare-file");
+  if (!input) return Promise.resolve(null);
+  return new Promise(resolve => {
+    _localComparePick = resolve;
+    input.value = "";  // allow re-picking the same file
+    input.click();
+  });
+}
+
+// Upload the browsed file and hand back a source descriptor (app detected server-side).
+async function handleCompareFileInput(input) {
+  const resolve = _localComparePick;
+  _localComparePick = null;
+  const file = input.files && input.files[0];
+  input.value = "";
+  if (!resolve) return;
+  if (!file) return resolve(null);
+  try {
+    const fd = new FormData();
+    fd.append("file", file);
+    const res = await fetch(`/api/vcat_monitor/upload_session?session=${session_token}`, {
+      method: "POST", body: fd,
+    });
+    const data = await res.json();
+    if (data.status !== "ok") {
+      alert(`Load failed: ${data.message || "error"}`);
+      return resolve(null);
+    }
+    resolve({ app: data.app, kind: "saved", path: data.name, label: data.name });
+  } catch (err) {
+    console.error("Compare load failed:", err);
+    alert("Load failed.");
+    resolve(null);
+  }
+}
+
+let _deviceComparePick = null;
+
+// Modal list of the device's test-result CSVs for the given app.
+async function pickDeviceFile(app) {
+  const deviceId = document.getElementById("device")?.value;
+  if (!deviceId) {
+    alert("No device connected — use “Browse local file…” instead.");
+    return null;
+  }
+  const root = await getAppRoot(deviceId, app);
+  if (!root) {
+    alert(`No ${appLabel(app)} data folder found on ${deviceId}.`);
+    return null;
+  }
+
+  let files = [];
+  try {
+    const path = `${root}/test_results/*.csv`;
+    const res = await fetch(
+      `/api/device/test_results_files?session=${session_token}&device=${deviceId}&path=${encodeURIComponent(path)}`
+    );
+    if (res.ok) files = await res.json();  // backend sorts newest-first
+  } catch (err) {
+    console.error("Compare: device file list failed:", err);
+  }
+  if (!files.length) {
+    alert(`No ${appLabel(app)} test-result files found on ${deviceId}.`);
+    return null;
+  }
+
+  const modal = document.getElementById("compare-picker-modal");
+  const body = document.getElementById("compare-picker-body");
+  return new Promise(resolve => {
+    const finish = (val) => {
+      _deviceComparePick = null;
+      modal.style.display = "none";
+      resolve(val);
+    };
+    _deviceComparePick = finish;
+
+    body.innerHTML = "";
+    files.forEach(f => {
+      const tr = document.createElement("tr");
+      const name = document.createElement("td");
+      name.textContent = f.filename;
+      const date = document.createElement("td");
+      date.textContent = f.date || "";
+      const size = document.createElement("td");
+      size.className = "size-col";
+      size.textContent = fmtFileSize(f.size);
+      tr.append(name, date, size);
+      tr.onclick = () => finish({ app, kind: "device", path: f.path, label: f.filename });
+      body.appendChild(tr);
+    });
+    modal.style.display = "block";
+  });
+}
+
+function closeComparePicker() {
+  const finish = _deviceComparePick;
+  if (finish) finish(null);
+  else document.getElementById("compare-picker-modal").style.display = "none";
+}
+
+// --- the comparison tab ---
+
+// Size every visible comparison scroller to the rest of the viewport, so its
+// sticky column headers pin and the pairs scroll under them.
+function sizeCompareAreas() {
+  document.querySelectorAll(".compare-scroll").forEach(el => {
+    if (el.offsetParent === null) return;  // hidden tab — skip
+    const top = el.getBoundingClientRect().top;
+    el.style.height = `${Math.max(300, window.innerHeight - top - 15)}px`;
+  });
+}
+
+function showCompareTab(host, tabId) {
+  host.show(tabId);
+  window.scrollTo(0, 0);  // the pairs scroll inside the pane, not with the page
+  sizeCompareAreas();
+}
+
+function compareTabIdFor(sources) {
+  const slug = src => src.label.replace(/[^a-zA-Z0-9_-]/g, "-").slice(0, 24);
+  return `cmp-${sources.map(slug).join("-vs-")}`;
+}
+
+// Two logs read as "a vs b"; more than that would overflow the tab strip.
+function compareTabLabel(sources) {
+  if (sources.length === 2) return `⇄ ${sources[0].label} vs ${sources[1].label}`;
+  return `⇄ ${sources[0].label} +${sources.length - 1} more`;
+}
+
+async function loadTelemetryFor(src) {
+  const deviceId = document.getElementById("device")?.value || "";
+  const url = src.kind === "saved"
+    ? `/api/vcat_monitor/load_saved?session=${session_token}&app=${src.app}` +
+      `&name=${encodeURIComponent(src.path)}`
+    : `/api/vcat_monitor/telemetry_from_file?session=${session_token}&device=${deviceId}` +
+      `&app=${src.app}&telemetry_file_path=${encodeURIComponent(src.path)}`;
+  const data = await (await fetch(url)).json();
+  if (data.status === "error" || !data.telemetry_data) {
+    throw new Error(data.message || "no telemetry data in file");
+  }
+  return data;
+}
+
+function removeCompareTab(tabId) {
+  const existed = !!document.getElementById(`${tabId}-tab`);
+  const st = compareStateByTabId[tabId];
+  (st ? st.sides : []).forEach(sideId => {
+    Object.values(chartsByTabId[sideId] || {}).forEach(c => c && c.destroy && c.destroy());
+    delete chartsByTabId[sideId];
+  });
+  delete compareStateByTabId[tabId];
+  document.getElementById(`${tabId}-tab-btn`)?.remove();
+  document.getElementById(`${tabId}-tab`)?.remove();
+  openedFileTabs.delete(tabId);
+  if (existed && !document.getElementById("device")?.options.length) showNoDeviceUI(true);
+}
+
+// Header row above each column, naming the file that column belongs to.
+function compareColumnHead(src, side) {
+  const head = document.createElement("div");
+  head.className = "cmp-col-head";
+  const tag = document.createElement("span");
+  tag.className = "cmp-col-tag";
+  tag.textContent = side;
+  head.append(tag, document.createTextNode(` ${src.label}`));
+  head.title = `${src.label} (${src.kind === "device" ? "on device" : "local file"})`;
+  return head;
+}
+
+function compareToolbar(tabId, sources) {
+  const bar = document.createElement("div");
+  bar.className = "telemetry-toolbar compare-toolbar";
+  const left = document.createElement("div");
+  left.className = "compare-title";
+  left.textContent = `⇄ ${sources.map(s => s.label).join("  vs  ")}`;
+  left.title = left.textContent;
+  const right = document.createElement("div");
+
+  const pdf = document.createElement("button");
+  pdf.type = "button";
+  pdf.className = "cmp-pdf-btn";
+  pdf.dataset.export = "pdf";
+  pdf.textContent = "⤓ Save PDF";
+  pdf.title = "Save this comparison — header plus every chart row — as a PDF";
+  pdf.disabled = true;  // enabled once every column has rendered
+  pdf.onclick = () => exportTabPdf(tabId);
+  right.appendChild(pdf);
+
+  const xls = document.createElement("button");
+  xls.type = "button";
+  xls.className = "cmp-pdf-btn cmp-xls-btn";
+  xls.dataset.export = "xlsx";
+  xls.textContent = "⤓ Save Spreadsheet";
+  xls.title = "Save a per-hour battery table (.xlsx) for every log, ready to chart";
+  xls.disabled = true;  // enabled once every column has rendered
+  xls.onclick = () => exportTabSpreadsheet(tabId);
+  right.appendChild(xls);
+
+  const align = document.createElement("label");
+  align.className = "cmp-align";
+  align.title = "Plot every column on one shared x/y range so magnitudes compare directly";
+  const box = document.createElement("input");
+  box.type = "checkbox";
+  box.className = "cmp-align-box";
+  box.checked = true;
+  box.onchange = () => {
+    const st = compareStateByTabId[tabId];
+    if (st) applyCompareAlignment(st.sides, box.checked);
+  };
+  align.append(box, document.createTextNode(" Align axes"));
+  right.appendChild(align);
+
+  const sel = document.createElement("select");
+  sel.className = "compare-select";
+  sel.title = "Add another log to this comparison";
+  sel.onchange = () => handleCompareSelect(sel);
+  [["", "⇄ Compare To…"], ["device", "Open file on device…"], ["local", "Browse local file…"]]
+    .forEach(([value, text]) => {
+      const opt = document.createElement("option");
+      opt.value = value;
+      opt.textContent = text;
+      sel.appendChild(opt);
+    });
+  right.appendChild(sel);
+  bar.append(left, right);
+  return bar;
+}
+
+// A telemetry pane's markup, minus the bits that make no sense per-side inside a
+// comparison (its own view-mode toolbar and Focus containers).
+function buildCompareSide(staging, sideId, app) {
+  const holder = document.createElement("div");
+  holder.className = "cmp-side";
+  holder.id = `${sideId}-tab`;
+  staging.appendChild(holder);
+
+  if (app === "vcat_ai") {
+    setupAiTelemetryCanvas(sideId);
+  } else {
+    const clone = document.importNode(
+      document.getElementById("telemetry-tab-template").content, true);
+    clone.querySelectorAll("canvas[data-id]").forEach(c => {
+      c.id = `${sideId}-${c.getAttribute("data-id")}`;
+    });
+    holder.appendChild(clone);
+  }
+  holder.querySelector(".telemetry-toolbar")?.remove();
+  holder.querySelector(".tele-focus")?.remove();
+  // Play/Stop act on the *live* device; a comparison is always historical.
+  holder.querySelector(".player-controls")?.remove();
+}
+
+// Group every column's charts by title: one grid row per metric, one cell per log
+// in column order. A log missing a metric gets a placeholder so the row stays aligned.
+function interleaveCompareGrid(grid, sideIds) {
+  const wrappersOf = sideId => {
+    const holder = document.getElementById(`${sideId}-tab`);
+    return holder
+      ? [...holder.querySelectorAll(":scope > .dashboard-grid > .chart-wrapper")]
+      : [];
+  };
+  const perSide = sideIds.map(wrappersOf);
+
+  const titles = [];
+  perSide.flat().forEach(w => {
+    const t = wrapperTitle(w);
+    if (!titles.includes(t)) titles.push(t);
+  });
+
+  titles.forEach(title => {
+    perSide.forEach((list, i) => {
+      const w = list.find(x => wrapperTitle(x) === title);
+      if (w) {
+        w.dataset.side = sideIds[i];
+        grid.appendChild(w);
+      } else {
+        const empty = document.createElement("div");
+        empty.className = "chart-wrapper cmp-empty";
+        empty.textContent = `${title} — not recorded in this log`;
+        grid.appendChild(empty);
+      }
+    });
+  });
+}
+
+// Both the sticky header bar and the grid need the same track layout so the columns
+// stay lined up, including while scrolled sideways.
+function applyCompareColumns(elements, count) {
+  const columns = `repeat(${count}, minmax(${COMPARE_MIN_COL_PX}px, 1fr))`;
+  elements.forEach(el => el && (el.style.gridTemplateColumns = columns));
+}
+
+// The Temperature chart plots system-thermal status normalized against its own y
+// max, so moving that max means rescaling the series with it.
+function rescaleNormalized(dataset, newMax) {
+  if (dataset.normMax === undefined || dataset.normMax === newMax) return;
+  const factor = newMax / dataset.normMax;
+  dataset.data = dataset.data.map(v => (typeof v === "number" ? v * factor : v));
+  dataset.normMax = newMax;
+}
+
+// Align axes: give both sides of each metric pair one shared x and y range, so the
+// two charts are read against the same ruler instead of each auto-fitting its own
+// data. Off restores each chart's own scaling — worth having, because a shared axis
+// squashes a short run into the timeline of a much longer one.
+function applyCompareAlignment(sides, on) {
+  const keys = [];
+  sides.forEach(s => Object.keys(chartsByTabId[s] || {}).forEach(k => {
+    if (!keys.includes(k)) keys.push(k);
+  }));
+
+  keys.forEach(key => {
+    const pair = sides.map(s => (chartsByTabId[s] || {})[key]).filter(Boolean);
+    if (pair.length < 2) return;
+
+    // Remember each chart's own scaling once, so the toggle is reversible.
+    pair.forEach(c => {
+      c._cmpOwnScale ||= {
+        xMax: c.options.scales.x.max,
+        yMax: c.options.scales.y.max,
+        step: c.options.scales.x.ticks.stepSize,
+        norm: c.data.datasets.map(d => d.normMax),
+      };
+    });
+
+    if (on) {
+      const xMax = Math.max(...pair.map(c => c.scales.x.max));
+      const yMax = Math.max(...pair.map(c => c.scales.y.max));
+      const step = computeStepSize(xMax);
+      pair.forEach(c => {
+        c.options.scales.x.min = 0;
+        c.options.scales.x.max = xMax;
+        c.options.scales.x.ticks.stepSize = step;
+        if (Number.isFinite(yMax)) {
+          c.data.datasets.forEach(d => rescaleNormalized(d, yMax));
+          c.options.scales.y.max = yMax;
+        }
+      });
+    } else {
+      pair.forEach(c => {
+        const own = c._cmpOwnScale;
+        c.options.scales.x.max = own.xMax;
+        c.options.scales.x.ticks.stepSize = own.step;
+        c.options.scales.y.max = own.yMax;
+        c.data.datasets.forEach((d, i) => {
+          if (own.norm[i] !== undefined) rescaleNormalized(d, own.norm[i]);
+        });
+      });
+    }
+    pair.forEach(c => c.update("none"));
+  });
+}
+
+// `sources` is one descriptor per column (two or more); `cached` supplies already
+// loaded payloads positionally so adding a column does not re-read the others.
+async function openCompareTab(sources, cached = []) {
+  const app = sources[0].app;
+  const odd = sources.find(s => s.app !== app);
+  if (odd) {
+    return alert(
+      `Can't compare a ${appLabel(app)} log with a ${appLabel(odd.app)} log — ` +
+      `they record different metrics.`);
+  }
+  const host = tabHost(app);
+  const tabId = compareTabIdFor(sources);
+  const sides = sources.map((_, i) => `${tabId}-${sideTag(i)}`);
+
+  removeCompareTab(tabId);  // re-opening the same set rebuilds it
+
+  const btn = document.createElement("button");
+  btn.id = `${tabId}-tab-btn`;
+  btn.className = host.btnClass;
+  btn.title = sources.map(s => s.label).join("  vs  ");
+  const label = document.createElement("span");
+  label.textContent = compareTabLabel(sources);
+  btn.appendChild(label);
+  const close = document.createElement("span");
+  close.textContent = " ✖";
+  close.style.marginLeft = "8px";
+  close.style.color = "#ccc";
+  close.style.cursor = "pointer";
+  close.onclick = (e) => {
+    e.stopPropagation();
+    removeCompareTab(tabId);
+    host.show(host.home);
+  };
+  btn.appendChild(close);
+  btn.onclick = () => showCompareTab(host, tabId);
+  document.getElementById(host.header).appendChild(btn);
+
+  const pane = document.createElement("div");
+  pane.id = `${tabId}-tab`;
+  pane.className = `${host.paneClass} compare-pane`;
+  pane.style.display = "none";
+  pane.appendChild(compareToolbar(tabId, sources));
+
+  // The pairs scroll inside the pane rather than with the page: `html, body {
+  // overflow-y: auto }` means a sticky header in the document flow never pins, and
+  // an inner scroller also keeps the toolbar and column names in place.
+  const scroller = document.createElement("div");
+  scroller.className = "compare-scroll";
+
+  // Column headers sit in their own sticky bar rather than in the grid's first
+  // row: a sticky grid *item* is confined to its own row and scrolls away with it.
+  const heads = document.createElement("div");
+  heads.className = "compare-heads";
+  sources.forEach((src, i) => heads.appendChild(compareColumnHead(src, sideTag(i))));
+  scroller.appendChild(heads);
+
+  const grid = document.createElement("div");
+  grid.className = "compare-grid";
+  scroller.appendChild(grid);
+  // Columns get a floor width so more than about three logs scroll sideways
+  // rather than squeezing every chart into an unreadable sliver.
+  applyCompareColumns([heads, grid], sources.length);
+  pane.appendChild(scroller);
+
+  // Charts are built here first (off-screen but laid out, so canvases get a real
+  // size) and then moved into the shared grid.
+  const staging = document.createElement("div");
+  staging.className = "cmp-staging";
+  pane.appendChild(staging);
+
+  document.getElementById(host.content).appendChild(pane);
+  openedFileTabs.add(tabId);
+  compareStateByTabId[tabId] = { sources, sides, data: sources.map(() => null) };
+  showNoDeviceUI(false);
+  ensureAppTab(app);   // the app's panel must be the visible one, otherwise the
+  showAppTab(app);     // canvases are laid out at zero width and draw nothing
+  showCompareTab(host, tabId);
+
+  sides.forEach(sideId => buildCompareSide(staging, sideId, app));
+
+  let loaded;
+  try {
+    loaded = await Promise.all(
+      sources.map((src, i) => cached[i] || loadTelemetryFor(src)));
+  } catch (err) {
+    removeCompareTab(tabId);
+    host.show(host.home);
+    alert(`Could not build the comparison:\n\n${err.message || err}`);
+    return null;
+  }
+
+  compareStateByTabId[tabId].data = loaded;
+  sides.forEach((sideId, i) => renderFileTelemetry(sideId, app, loaded[i]));
+  interleaveCompareGrid(grid, sides);
+  staging.remove();
+  sizeCompareAreas();
+  sides.forEach(resizeTabCharts);
+  applyCompareAlignment(sides, true);
+
+  updateExportButtons(tabId);
+  return tabId;
+}
+
+// ---- Save a comparison as a PDF ----------------------------------------------
+// The pages mirror the on-screen layout: a header identifying both runs, then one
+// row per metric with A left and B right. Charts are exported straight from the
+// live canvases, so what you compared is exactly what lands in the file (including
+// the shared axes when "Align axes" is on).
+
+// Floor width for a comparison column; past ~3 logs the grid scrolls sideways
+// instead of squeezing every chart down to an unreadable sliver.
+const COMPARE_MIN_COL_PX = 420;
+
+const PDF_DARK = "#1b1b1b";   // matches .chart-wrapper — canvases are transparent
+const PDF_INK = "#111111";
+const PDF_MUTED = "#666666";
+
+// Chart bitmaps dominate the file size, so they are re-rasterised before embedding:
+// capped at PDF_IMG_WIDTH (a canvas on a retina screen has a 2x backing store, which
+// otherwise doubles the PDF for no visible gain) and written as JPEG. A cell is
+// ~386pt wide, so 900px is still ~170 DPI in print.
+const PDF_IMG_WIDTH = 900;
+const PDF_JPEG_QUALITY = 0.82;
+
+// Labels can be long once disambiguated, so filenames get a trimmed version.
+function exportStem(payloads) {
+  const clean = v => String(v || "")
+    .replace(/\.csv$/i, "")
+    .replace(/[^A-Za-z0-9._-]/g, "_")
+    .slice(0, 14)
+    .replace(/_+$/, "");
+  const stem = comparisonSeriesLabels(payloads).map(clean).join("_vs_");
+  return stem.length > 80 ? `${payloads.length}_logs_${stem.slice(0, 60)}` : stem;
+}
+
+function pdfFileName(sources, payloads) {
+  const kind = sources.length > 1 ? "compare" : "report";
+  return `${kind}_${exportStem(payloads)}.pdf`;
+}
+
+// Chart.js canvases are transparent with light strokes, so the dark card colour is
+// painted in behind them — both to stay legible on a white page and because JPEG
+// has no alpha channel.
+function pdfChartImage(chart) {
+  const src = chart.canvas;
+  const scale = Math.min(1, PDF_IMG_WIDTH / (src.width || PDF_IMG_WIDTH));
+  const w = Math.max(1, Math.round(src.width * scale));
+  const h = Math.max(1, Math.round(src.height * scale));
+  const off = document.createElement("canvas");
+  off.width = w;
+  off.height = h;
+  const ctx = off.getContext("2d");
+  ctx.fillStyle = PDF_DARK;
+  ctx.fillRect(0, 0, w, h);
+  ctx.drawImage(src, 0, 0, w, h);
+  return off.toDataURL("image/jpeg", PDF_JPEG_QUALITY);
+}
+
+// Park the tooltip on each chart's final sample before rasterising, so the PDF
+// carries the end-of-run numbers (and the elapsed time they belong to) instead of
+// leaving them to be read off the axes. Returns false if there is nothing to show.
+function pdfActivateFinalTooltip(chart) {
+  const elements = chart.data.datasets
+    .map((ds, datasetIndex) => ({
+      datasetIndex,
+      index: ((ds && ds.data) || []).length - 1,
+    }))
+    .filter(e => e.index >= 0 && chart.isDatasetVisible(e.datasetIndex));
+  if (!elements.length) return false;
+
+  // Anchor the caret on the first series' last point; Chart.js keeps the box inside
+  // the canvas from there.
+  const meta = chart.getDatasetMeta(elements[0].datasetIndex);
+  const point = meta && meta.data ? meta.data[elements[0].index] : null;
+  chart.tooltip.setActiveElements(elements, {
+    x: point ? point.x : chart.chartArea.right,
+    y: point ? point.y : chart.chartArea.top,
+  });
+  chart.update("none");
+  return true;
+}
+
+function pdfClearTooltip(chart) {
+  chart.tooltip.setActiveElements([], { x: 0, y: 0 });
+  chart.update("none");
+}
+
+function pdfDrawChart(doc, chart, x, y, w, h) {
+  doc.setFillColor(PDF_DARK);
+  doc.roundedRect(x, y, w, h, 4, 4, "F");
+  let activated = false;
+  try {
+    activated = pdfActivateFinalTooltip(chart);
+    doc.addImage(pdfChartImage(chart), "JPEG", x + 4, y + 4, w - 8, h - 8, undefined, "FAST");
+  } catch (err) {
+    console.error("chart -> image failed:", err);
+    doc.setTextColor(PDF_MUTED);
+    doc.setFontSize(9);
+    doc.text("chart unavailable", x + 10, y + h / 2);
+  } finally {
+    // Never leave a stuck tooltip on the chart the user is looking at.
+    if (activated) {
+      try { pdfClearTooltip(chart); } catch (e) { console.error("tooltip reset failed:", e); }
+    }
+  }
+}
+
+function exportTabPdf(tabId) {
+  const ctx = exportContextFor(tabId);
+  if (!ctx) return;
+  if (ctx.sources.length > PDF_MAX_COLUMNS) {
+    return alert(
+      `A PDF lays the logs out side by side, so it is limited to ${PDF_MAX_COLUMNS}. ` +
+      `This comparison has ${ctx.sources.length} — use Save Spreadsheet instead.`);
+  }
+  const jsPDFCtor = window.jspdf && window.jspdf.jsPDF;
+  if (!jsPDFCtor) {
+    return alert("PDF export needs the jsPDF library, which failed to load.\n" +
+                 "Check the network connection and reload the page.");
+  }
+
+  const { sources, sides, data } = ctx;
+  // compress: true -> FlateDecode on the page streams (jsPDF writes them raw otherwise).
+  const doc = new jsPDFCtor({
+    orientation: "landscape", unit: "pt", format: "a4", compress: true,
+  });
+  const pageW = doc.internal.pageSize.getWidth();
+  const pageH = doc.internal.pageSize.getHeight();
+  const margin = 28;
+  const gap = 14;
+  const cols = sides.length;
+  const colW = (pageW - margin * 2 - gap * (cols - 1)) / cols;
+
+  // --- cover: what is being compared ---
+  doc.setFont("helvetica", "bold");
+  doc.setFontSize(15);
+  doc.setTextColor(PDF_INK);
+  doc.text(cols > 1 ? "VCAT result comparison" : "VCAT result", margin, margin + 6);
+  doc.setFont("helvetica", "normal");
+  doc.setFontSize(9);
+  doc.setTextColor(PDF_MUTED);
+  doc.text(`Generated ${new Date().toLocaleString()}`, margin, margin + 22);
+
+  // One row per field, one column per run: reads the same as the spreadsheet block
+  // and keeps working when there are more than two logs.
+  const labelW = 78;
+  const fieldColW = (pageW - margin * 2 - labelW - gap * (cols - 1)) / cols;
+  let headY = margin + 48;
+
+  doc.setFont("helvetica", "bold");
+  doc.setFontSize(9);
+  sources.forEach((src, i) => {
+    const x = margin + labelW + i * (fieldColW + gap);
+    doc.setFillColor("#0aa77a");
+    doc.roundedRect(x, headY - 11, 16, 14, 3, 3, "F");
+    doc.setTextColor("#ffffff");
+    doc.text(sideTag(i), x + 5, headY - 1);
+    doc.setTextColor(PDF_INK);
+    doc.text(doc.splitTextToSize(src.label, fieldColW - 22)[0], x + 22, headY - 1);
+  });
+
+  doc.setFont("helvetica", "normal");
+  doc.setFontSize(8.5);
+  let fieldY = headY + 18;
+  runFieldRows(sources, data).forEach(([field, ...values]) => {
+    doc.setTextColor(PDF_MUTED);
+    doc.text(field, margin, fieldY);
+    doc.setTextColor(PDF_INK);
+    values.forEach((v, i) => {
+      const x = margin + labelW + i * (fieldColW + gap);
+      doc.text(doc.splitTextToSize(String(v), fieldColW - 4)[0], x, fieldY);
+    });
+    fieldY += 12;
+  });
+
+  // --- one row per metric, one column per log ---
+  const titleByKey = {};
+  paneOf(tabId)?.querySelectorAll(".chart-wrapper").forEach(w => {
+    const h3 = w.querySelector("h3");
+    const canvas = w.querySelector("canvas");
+    if (!h3 || !canvas) return;
+    const key = canvas.id.replace(/^.*?-(?=[a-z]+Chart$)/, "");
+    if (!titleByKey[key]) titleByKey[key] = h3.textContent.trim();
+  });
+
+  const keys = [];
+  sides.forEach(sd => Object.keys(chartsByTabId[sd] || {}).forEach(k => {
+    if (!keys.includes(k)) keys.push(k);
+  }));
+  const rowsPerPage = 2;
+  const titleH = 16;
+  const rowH = (pageH - margin * 2 - rowsPerPage * titleH - (rowsPerPage - 1) * gap) / rowsPerPage;
+
+  keys.forEach((key, idx) => {
+    if (idx % rowsPerPage === 0) doc.addPage();
+    const row = idx % rowsPerPage;
+    const top = margin + row * (rowH + titleH + gap);
+
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(10);
+    doc.setTextColor(PDF_INK);
+    doc.text(titleByKey[key] || key, margin, top + 11);
+    doc.setFont("helvetica", "normal");
+    doc.setFontSize(8);
+    doc.setTextColor(PDF_MUTED);
+    if (cols > 1) {
+      sides.forEach((_, i) => {
+        doc.text(sideTag(i), margin + (i + 1) * colW + i * gap - 8, top + 11);
+      });
+    }
+
+    sides.forEach((sideId, i) => {
+      const chart = chartsByTabId[sideId]?.[key];
+      if (chart) {
+        pdfDrawChart(doc, chart, margin + i * (colW + gap), top + titleH, colW, rowH);
+      }
+    });
+  });
+
+  // --- page numbers ---
+  const footer = sources.map(sc => sc.label).join("  vs  ");
+  const pages = doc.internal.getNumberOfPages();
+  for (let i = 1; i <= pages; i++) {
+    doc.setPage(i);
+    doc.setFontSize(8);
+    doc.setTextColor(PDF_MUTED);
+    doc.text(doc.splitTextToSize(footer, pageW - margin * 2 - 40)[0], margin, pageH - 12);
+    doc.text(`${i} / ${pages}`, pageW - margin - 24, pageH - 12);
+  }
+
+  doc.save(pdfFileName(sources, data));
+}
+
+// ---- Save a comparison as a spreadsheet ---------------------------------------
+// A per-hour table laid out for charting: hour 0..n down column A, one column per
+// log. For each whole hour we take the sample nearest that hour mark, which is
+// what "battery at hour 3" means for logs sampled every 30s or so.
+
+const HOUR_S = 3600;
+
+// Describes each run, one row per field and one value per log. Used for the block
+// above the spreadsheet table and for the PDF cover, so both stay in step.
+function runFieldRows(sources, payloads) {
+  const labels = comparisonSeriesLabels(payloads);
+  const dash = v => (v === undefined || v === null || v === "" ? "—" : v);
+  const fps = v => (Number(v) > 0 ? `${Number(v).toFixed(2)} fps` : "—");
+  const vids = payloads.map(d => ((d && d.test_details) || {}).currentTestVideo || {});
+  const infos = payloads.map(d => (d && d.run_info) || {});
+  const spans = payloads.map(d => {
+    const b = ((d && d.telemetry_data) || {}).battery || [];
+    return b.length ? b[b.length - 1].elapsed_time : 0;
+  });
+  const row = (field, fn) => [field, ...payloads.map((_, i) => dash(fn(vids[i], infos[i], i)))];
+  return [
+    row("Codec", (v, info, i) => labels[i]),
+    row("Input resolution", v => v.resolution),
+    row("Frame rate", v => fps(v.framerate)),
+    row("Input file", v => v.fileName),
+    row("Decoder", v => v.videoDecoder),
+    row("Device", (v, info) => [info.manufacturer, info.model].filter(Boolean).join(" ")),
+    row("SoC vendor", (v, info) => info.soc_manufacturer),
+    row("SoC", (v, info) => info.soc_model),
+    row("Android", (v, info) => info.android_version),
+    row("vcat version", (v, info) => info.vcat_version),
+    row("Playlist", (v, info) => info.playlist),
+    row("Test duration", (v, info, i) => formatElapsedClock(spans[i])),
+    row("Execution ID", (v, info) => info.execution_id),
+    row("Log file", (v, info, i) => sources[i].label),
+    row("Source", (v, info, i) => (sources[i].kind === "device" ? "on device" : "local file")),
+  ];
+}
+
+// Nearest sample to `target`, or null if the closest one is further away than
+// `tolerance` (a gap in the log, rather than a real reading for that hour).
+function sampleNearest(series, target, tolerance, valueKey) {
+  let best = null;
+  let bestGap = Infinity;
+  for (const p of series) {
+    const gap = Math.abs(p.elapsed_time - target);
+    if (gap < bestGap) { bestGap = gap; best = p; }
+    else if (p.elapsed_time > target && bestGap < Infinity) break;  // series is ordered
+  }
+  if (!best || bestGap > tolerance) return null;
+  const v = best[valueKey];
+  return typeof v === "number" ? v : null;
+}
+
+// The longest-running test sets the axis: hours run to the hour that log *ends* in
+// (ceil, not floor — flooring dropped the last partial hour, so a 5.9 h run stopped
+// at hour 5 and its end-of-test reading was lost). A shorter log's trailing cells
+// stay blank so a chart shows no line there instead of a false drop to zero.
+function buildHourlyTable(seriesList, valueKey = "level") {
+  const spans = seriesList.map(s => (s.length ? s[s.length - 1].elapsed_time : 0));
+  const lastHour = Math.ceil(Math.max(0, ...spans) / HOUR_S);
+  const rows = [];
+  for (let h = 0; h <= lastHour; h++) {
+    rows.push([
+      h,
+      ...seriesList.map(s => sampleNearest(s, h * HOUR_S, HOUR_S / 2, valueKey)),
+    ]);
+  }
+  // A run ending just past the hour (5.01 h) would leave a final row with nothing
+  // near enough to report; drop any trailing rows that are blank for every log.
+  while (rows.length > 1 && rows[rows.length - 1].slice(1).every(v => v === null)) {
+    rows.pop();
+  }
+  return rows;
+}
+
+// The codec is what distinguishes two runs — a log filename says nothing useful in
+// a chart legend. Falls back through decoder / resolution / file only if both sides
+// would otherwise carry the same label.
+function codecLabel(codec) {
+  return String(codec || "").replace(/^video\//i, "").toUpperCase();
+}
+
+function comparisonSeriesLabels(payloads) {
+  const parts = payloads.map(d => {
+    const v = ((d && d.test_details) || {}).currentTestVideo || {};
+    return {
+      codec: codecLabel(v.videoCodec),
+      decoder: v.videoDecoder || "",
+      resolution: v.resolution || "",
+      framerate: Number(v.framerate) > 0 ? `${Number(v.framerate).toFixed(2)} fps` : "",
+      file: String(v.fileName || "").replace(/\.[^.]+$/, ""),
+    };
+  });
+  const labels = parts.map(p => p.codec || "unknown");
+
+  // Two runs of the same codec would give identical columns; separate each clashing
+  // group by the first field that actually tells its members apart.
+  const groups = new Map();
+  labels.forEach((l, i) => {
+    if (!groups.has(l)) groups.set(l, []);
+    groups.get(l).push(i);
+  });
+  groups.forEach((idxs, label) => {
+    if (idxs.length < 2) return;
+    const key = ["decoder", "framerate", "resolution", "file"].find(
+      k => new Set(idxs.map(i => parts[i][k])).size === idxs.length);
+    idxs.forEach(i => {
+      labels[i] = key
+        ? `${label} ${parts[i][key]}`.trim()
+        : `${label} (${sideTag(i)})`;
+    });
+  });
+  return labels;
+}
+
+async function exportTabSpreadsheet(tabId) {
+  const ctx = exportContextFor(tabId);
+  if (!ctx || ctx.data.some(d => !d)) return;
+
+  const { sources, data } = ctx;
+  const series = data.map(d => (d.telemetry_data && d.telemetry_data.battery) || []);
+  if (!series.some(sr => sr.length)) {
+    return alert("No battery data in these logs to tabulate.");
+  }
+
+  const rows = buildHourlyTable(series, "level");
+  const labels = comparisonSeriesLabels(data);
+  const stem = `battery_by_hour_${exportStem(data)}`;
+  const infoRows = runFieldRows(sources, data);
+
+  try {
+    const res = await fetch(
+      `/api/vcat_monitor/comparison_workbook?session=${session_token}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          metric: "Battery Level",
+          unit: "Battery Level (%)",
+          series_labels: labels,
+          rows,
+          info_rows: infoRows,
+          name: stem,
+          notes: [
+            "Battery level sampled at each whole hour of elapsed test time.",
+            "For every hour the reading nearest that hour mark is used " +
+              `(no further away than ${HOUR_S / 2 / 60} minutes; blank if the log has no sample that close).`,
+            "Hours run to the hour in which the longest-running test stopped, so its " +
+              "final reading is included; a shorter run simply ends early (blank cells).",
+            "Each column is one log; the block above the table identifies them.",
+          ],
+        }),
+      }
+    );
+    if (!res.ok) {
+      let msg = `HTTP ${res.status}`;
+      try { msg = (await res.json()).message || msg; } catch (e) { /* not json */ }
+      return alert(`Could not build the spreadsheet:\n\n${msg}`);
+    }
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `${stem}.xlsx`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+  } catch (err) {
+    console.error("Spreadsheet export failed:", err);
+    alert("Spreadsheet export failed.");
+  }
+}
+
 // Toggle the Playlists / Test Results sub-tabs in the vcat-d Device tab.
 function showDeviceSubTab(name) {
   const tabs = { playlists: "playlists-subtab", "test-results": "test-results-subtab" };
@@ -2514,14 +3596,17 @@ function populateDeviceDropdown() {
     });
 }
 
-// Show/hide the "no device connected" overlay and the main tab UI.
+// Show/hide the "no device connected" overlay and the main tab UI. Files opened
+// from disk keep the UI up even with no device: this runs on the 5s device poll,
+// so without that guard a locally-opened session would vanish moments after load.
 function showNoDeviceUI(none) {
+  const hide = none && openedFileTabs.size === 0;
   const overlay = document.getElementById("no-device-overlay");
   const tabContent = document.getElementById("tab-content");
   const tabHeader = document.getElementById("tab-header");
-  if (overlay) overlay.style.display = none ? "block" : "none";
-  if (tabContent) tabContent.style.display = none ? "none" : "block";
-  if (tabHeader) tabHeader.style.display = none ? "none" : "flex";
+  if (overlay) overlay.style.display = hide ? "block" : "none";
+  if (tabContent) tabContent.style.display = hide ? "none" : "block";
+  if (tabHeader) tabHeader.style.display = hide ? "none" : "flex";
 }
 
 // Poll the connected-device list (server-side `adb devices`) and reconcile the
