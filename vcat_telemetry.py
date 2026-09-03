@@ -2194,11 +2194,9 @@ def api_comparison_workbook(session_id):
     logs nor needs the device. No device required."""
     body = request.get_json(silent=True) or {}
     labels = [str(x) for x in (body.get("series_labels") or [])]
-    rows = body.get("rows") or []
-    metric = str(body.get("metric") or "Comparison")
-    unit = str(body.get("unit") or "")
+    sheets = body.get("sheets") or []
 
-    if not labels or not rows:
+    if not labels or not sheets:
         return jsonify({"status": "error", "message": "No table data provided"}), 400
 
     def cell(v):
@@ -2209,17 +2207,26 @@ def api_comparison_workbook(session_id):
         except (TypeError, ValueError):
             return None
 
-    table = [[cell(r[0])] + [cell(v) for v in r[1:]] for r in rows if r]
+    specs = []
+    for spec in sheets:
+        rows = spec.get("rows") or []
+        if not rows:
+            continue
+        specs.append({
+            "metric": str(spec.get("metric") or "Comparison"),
+            "unit": str(spec.get("unit") or ""),
+            "rows": [[cell(r[0])] + [cell(v) for v in r[1:]] for r in rows if r],
+        })
+    if not specs:
+        return jsonify({"status": "error", "message": "No table data provided"}), 400
 
     try:
         with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as tf:
             out_path = tf.name
         write_comparison_workbook(
             out_path,
-            metric,
-            unit,
             labels,
-            table,
+            specs,
             body.get("notes") or [],
             body.get("info_rows") or [],
         )

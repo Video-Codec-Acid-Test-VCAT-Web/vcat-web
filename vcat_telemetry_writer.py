@@ -358,29 +358,16 @@ def cleanup_all_workbooks():
 atexit.register(cleanup_all_workbooks)
 
 
-def write_comparison_workbook(
-    out_path: str,
+def _write_metric_sheet(
+    ws: Worksheet,
     metric: str,
     unit: str,
     series_labels: List[str],
     rows: List[List[Any]],
-    notes: List[str] = None,
     info_rows: List[List[Any]] = None,
-) -> str:
-    """Write a per-hour comparison table, laid out so it can be charted directly.
-
-    Above the table sits a small block describing each run (codec, input format,
-    device, SoC), one column per series so it lines up with the data underneath.
-    The table itself is a plain rectangular range — hour in column A, one series per
-    following column — with the series labels on its header row so a chart picks
-    them up as its legend. Missing samples are left as empty cells rather than 0,
-    which would otherwise plot as a drop to zero.
-    """
+) -> None:
+    """One metric per sheet: run description above, then the chartable table."""
     from openpyxl.chart import LineChart, Reference
-
-    wb = Workbook()
-    ws = cast(Worksheet, wb.active)
-    ws.title = metric[:31] or "Comparison"
 
     title = ws.cell(row=1, column=1, value=f"{metric} — per-hour comparison")
     title.font = Font(bold=True, size=13)
@@ -423,6 +410,35 @@ def write_comparison_workbook(
         chart.set_categories(cats)
         ws.add_chart(chart, f"{get_column_letter(3 + len(series_labels))}{table_row}")
 
+
+def write_comparison_workbook(
+    out_path: str,
+    series_labels: List[str],
+    sheets: List[Dict[str, Any]],
+    notes: List[str] = None,
+    info_rows: List[List[Any]] = None,
+) -> str:
+    """Write one per-hour comparison sheet per metric, each ready to chart.
+
+    `sheets` is [{metric, unit, rows}, ...] — one worksheet each, in order. Above
+    every table sits the same block describing each run (codec, input format,
+    device, SoC), one column per series so it lines up with the data underneath, so
+    a sheet still makes sense on its own. The table itself is a plain rectangular
+    range — hour in column A, one series per following column — with the series
+    labels on its header row so a chart picks them up as its legend. Missing
+    samples are left as empty cells rather than 0, which would otherwise plot as a
+    drop to zero.
+    """
+    wb = Workbook()
+    for i, spec in enumerate(sheets):
+        metric = str(spec.get("metric") or f"Metric {i + 1}")
+        ws = cast(Worksheet, wb.active) if i == 0 else wb.create_sheet()
+        ws.title = metric[:31] or f"Metric {i + 1}"
+        _write_metric_sheet(
+            ws, metric, str(spec.get("unit") or ""), series_labels,
+            spec.get("rows") or [], info_rows,
+        )
+
     if notes:
         info = wb.create_sheet("About")
         for line in notes:
@@ -430,5 +446,6 @@ def write_comparison_workbook(
         info.column_dimensions["A"].width = 110
 
     wb.save(out_path)
-    logger.info(f"📁 Wrote comparison workbook: {out_path}")
+    logger.info(
+        f"📁 Wrote comparison workbook ({len(sheets)} metric sheets): {out_path}")
     return out_path

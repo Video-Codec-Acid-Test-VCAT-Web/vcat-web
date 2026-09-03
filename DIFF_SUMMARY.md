@@ -503,11 +503,13 @@ Both are available on a **single-log** panel and on a comparison, driven by one
 
 ### Spreadsheet (`.xlsx`, openpyxl — already a dependency)
 - `POST /api/vcat_monitor/comparison_workbook` → `write_comparison_workbook()`. The client
-  resamples and posts the ~20-row table, so nothing is re-read and it works for
+  resamples and posts the small tables, so nothing is re-read and it works for
   device-sourced and local logs alike. No device required.
-- Sheet 1: the `runFieldRows()` block in the cells **above** the table, then `Hour` in
-  column A and one column per log, plus a ready-made line chart.
-  Sheet 2 (`About`) records the sampling rule.
+- **One sheet per metric** — `Battery Level` and `Temperature` (battery °C) — each with the
+  `runFieldRows()` block in the cells **above** the table, then `Hour` in column A, one
+  column per log, and a ready-made line chart (`_write_metric_sheet()`). A metric no log
+  recorded is skipped rather than written empty. A final `About` sheet records the rules.
+  Temperature is the reading *at* the hour mark, not an hourly average.
 - `buildHourlyTable()`: for each whole hour the reading **nearest that hour mark** within
   ±30 min (`sampleNearest`), else blank. Hours run to `ceil(longest span)` so the
   longest-running test sets the axis and its final reading is included — `floor` truncated a
@@ -556,6 +558,9 @@ Both are available on a **single-log** panel and on a comparison, driven by one
 - **Exports need a loaded payload**, so they are disabled on the **live** tab (same rule as
   Compare To); snapshot first.
 - **Excel/`.xlsx` produced before § L** carry memory in bytes and battery as a 0–1 fraction.
+- **Hourly sheets sample, not aggregate.** Battery moves slowly so the reading at the hour
+  mark is representative; temperature does not, so a per-hour min/avg/max would describe
+  thermal behaviour better if that becomes the point of interest.
 - **Focus-mode filmstrip thumbnails** still clip Test Details text (a 150 px-tall preview
   with `overflow: hidden`); § P improved but did not eliminate the overhang.
 - **PDF charts keep the app's dark theme** (the card colour is painted behind each

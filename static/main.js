@@ -2821,7 +2821,7 @@ function compareToolbar(tabId, sources) {
   xls.className = "cmp-pdf-btn cmp-xls-btn";
   xls.dataset.export = "xlsx";
   xls.textContent = "⤓ Save Spreadsheet";
-  xls.title = "Save a per-hour battery table (.xlsx) for every log, ready to chart";
+  xls.title = "Save per-hour battery and temperature tables (.xlsx) for every log, ready to chart";
   xls.disabled = true;  // enabled once every column has rendered
   xls.onclick = () => exportTabSpreadsheet(tabId);
   right.appendChild(xls);
@@ -3435,14 +3435,30 @@ async function exportTabSpreadsheet(tabId) {
   if (!ctx || ctx.data.some(d => !d)) return;
 
   const { sources, data } = ctx;
-  const series = data.map(d => (d.telemetry_data && d.telemetry_data.battery) || []);
-  if (!series.some(sr => sr.length)) {
-    return alert("No battery data in these logs to tabulate.");
+  const seriesFor = (key) =>
+    data.map(d => ((d.telemetry_data && d.telemetry_data[key]) || []));
+
+  // One sheet per metric, each a chartable per-hour table. A metric no log recorded
+  // is skipped rather than written as an empty sheet.
+  const metrics = [
+    { metric: "Battery Level", unit: "Battery Level (%)", key: "battery", value: "level" },
+    { metric: "Temperature", unit: "Battery Temp (°C)", key: "battery_temp", value: "temp" },
+  ];
+  const sheets = metrics
+    .map(m => ({ ...m, series: seriesFor(m.key) }))
+    .filter(m => m.series.some(sr => sr.length))
+    .map(m => ({
+      metric: m.metric,
+      unit: m.unit,
+      rows: buildHourlyTable(m.series, m.value),
+    }));
+
+  if (!sheets.length) {
+    return alert("No battery or temperature data in these logs to tabulate.");
   }
 
-  const rows = buildHourlyTable(series, "level");
   const labels = comparisonSeriesLabels(data);
-  const stem = `battery_by_hour_${exportStem(data)}`;
+  const stem = `hourly_${exportStem(data)}`;
   const infoRows = runFieldRows(sources, data);
 
   try {
@@ -3452,19 +3468,20 @@ async function exportTabSpreadsheet(tabId) {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          metric: "Battery Level",
-          unit: "Battery Level (%)",
           series_labels: labels,
-          rows,
+          sheets,
           info_rows: infoRows,
           name: stem,
           notes: [
-            "Battery level sampled at each whole hour of elapsed test time.",
+            `One sheet per metric (${sheets.map(sh => sh.metric).join(", ")}), ` +
+              "sampled at each whole hour of elapsed test time.",
             "For every hour the reading nearest that hour mark is used " +
               `(no further away than ${HOUR_S / 2 / 60} minutes; blank if the log has no sample that close).`,
             "Hours run to the hour in which the longest-running test stopped, so its " +
               "final reading is included; a shorter run simply ends early (blank cells).",
-            "Each column is one log; the block above the table identifies them.",
+            "Each column is one log; the block above each table identifies them.",
+            "Temperature is the battery temperature in °C — an instantaneous reading at " +
+              "the hour mark, not an average over the hour.",
           ],
         }),
       }
