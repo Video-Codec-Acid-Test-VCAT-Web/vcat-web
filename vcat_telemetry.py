@@ -387,44 +387,58 @@ def get_gpu_frame_stats(device_id: str, elapsed_time: float) -> Optional[GpuFram
         return None
 
 
-def get_thermal_status(device_id: str, elapsed_time: float) -> Optional[ThermalStatus]:
+def parse_thermal_dumpsys(out: str, elapsed_time: float):
+    """(per-zone ThermalStatus | None, overall 0-5 status | None) from
+    `dumpsys thermalservice` output. Both are optional: the HAL block is absent on
+    some devices, and the status line is printed separately from the temperatures."""
+    temps: Dict[str, float] = {}
+    status: Optional[int] = None
+    in_current = False
+
+    for line in out.splitlines():
+        stripped = line.strip()
+
+        m = re.match(r"Thermal Status:\s*(\d+)", stripped)
+        if m:
+            status = int(m.group(1))
+            continue
+
+        if stripped.startswith("Current temperatures from HAL"):
+            in_current = True
+            continue
+        if in_current:
+            if stripped.startswith("Current cooling") or stripped == "":
+                in_current = False
+                continue
+            m = re.match(r"Temperature\{mValue=([\d.]+),\s*mType=\d+,\s*mName=(\w+),", stripped)
+            if m:
+                temps[m.group(2).lower()] = float(m.group(1))
+
+    zones = ThermalStatus(
+        elapsed_time=elapsed_time,
+        cpu=temps.get("cpu"),
+        gpu=temps.get("gpu"),
+        npu=temps.get("npu"),
+        skin=temps.get("skin"),
+        soc=temps.get("soc"),
+    ) if temps else None
+
+    return zones, status
+
+
+def get_thermal_status(device_id: str, elapsed_time: float):
+    """Reads `dumpsys thermalservice` once for both the per-zone temperatures and
+    the overall throttling status."""
     try:
         result = subprocess.run(
             ["adb", "-s", device_id, "shell", "dumpsys thermalservice"],
             capture_output=True,
             text=True,
         )
-
-        temps: Dict[str, float] = {}
-        in_current = False
-
-        for line in result.stdout.splitlines():
-            stripped = line.strip()
-            if stripped.startswith("Current temperatures from HAL"):
-                in_current = True
-                continue
-            if in_current:
-                if stripped.startswith("Current cooling") or stripped == "":
-                    break
-                m = re.match(r"Temperature\{mValue=([\d.]+),\s*mType=\d+,\s*mName=(\w+),", stripped)
-                if m:
-                    temps[m.group(2).lower()] = float(m.group(1))
-
-        if not temps:
-            return None
-
-        return ThermalStatus(
-            elapsed_time=elapsed_time,
-            cpu=temps.get("cpu"),
-            gpu=temps.get("gpu"),
-            npu=temps.get("npu"),
-            skin=temps.get("skin"),
-            soc=temps.get("soc"),
-        )
-
+        return parse_thermal_dumpsys(result.stdout, elapsed_time)
     except Exception as e:
         logger.error(f"[get_thermal_status ERROR] {e}")
-        return None
+        return None, None
 
 
 def get_test_details(session_id, device_id: str) -> TestDetails:
@@ -577,7 +591,7 @@ def telemetry_worker():
                         f"[Monitor] Device {device_id} is not running a test, only collecting system stats"
                     )
 
-            battery = vcat_adb.get_battery_level(device_id)
+            battery, battery_temp = vcat_adb.get_battery_status(device_id)
             elapsed = time.time() - telemetry_data.start_time
             total_kb, used_kb = vcat_adb.get_system_memory(device_id)
             app_kb = vcat_adb.get_app_memory(device_id, _package_for_app(telemetry_data.app))
@@ -594,7 +608,7 @@ def telemetry_worker():
             cur_gpu_usage = get_gpu_stats(device_id, elapsed)
             cur_npu_usage = get_npu_stats(device_id, elapsed)
             cur_gpu_frame_stats = get_gpu_frame_stats(device_id, elapsed)
-            cur_thermal = get_thermal_status(device_id, elapsed)
+            cur_thermal, cur_thermal_status = get_thermal_status(device_id, elapsed)
 
             cpu_freqs = vcat_adb.get_cpu_frequencies(device_id)
 
@@ -612,19 +626,30 @@ def telemetry_worker():
 
                 if battery is not None:
                     telemetry_data.battery_data.append(
-                        BatteryEntry(elapsed_time=elapsed, level=battery)
+                        BatteryEntry(
+                            elapsed_time=elapsed,
+                            level=battery,
+                            battery_temp=battery_temp if battery_temp is not None else 0,
+                        )
                     )
 
-                    row = [
-                        [
-                            telemetry_data.battery_data[-1].elapsed_time,
-                            telemetry_data.battery_data[-1].level,
-                        ]
-                    ]
+                    entry = telemetry_data.battery_data[-1]
+                    # Columns the live worker can't fill (charge counter, current) are
+                    # left blank so temperature lands under its own header.
+                    row = [[entry.elapsed_time, entry.level, None, None, entry.battery_temp]]
                     append_telemetry(
                         telemetry_data.owner_session_id,
                         TelemetrySheet.BATTERY,
                         row,
+                    )
+
+                # The overall 0-5 throttling status, so the live Temperature chart has
+                # the same two series as the log-file view.
+                if cur_thermal_status is not None:
+                    if not isinstance(telemetry_data.system_thermal_status, list):
+                        telemetry_data.system_thermal_status = []
+                    telemetry_data.system_thermal_status.append(
+                        SystemThermalStatus(elapsed_time=elapsed, status=cur_thermal_status)
                     )
 
                 if used_kb is not None and app_kb is not None:

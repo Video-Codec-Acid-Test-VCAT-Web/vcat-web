@@ -1265,6 +1265,14 @@ async function fetchAndUpdateTelemetry() {
     console.error('❌ Telemetry fetch failed:', err);
   }
 
+  // Temperature straight from the ADB worker (dumpsys battery + thermalservice), so
+  // it shows during a live session regardless of what the app is logging. The chart
+  // canvas isn't in the template, so it's injected on the first poll.
+  if (workerTel) {
+    injectTempChart(tabId);
+    updateTempChart(workerTel, tabId);
+  }
+
   // Log file: total CPU + CPU freq, memory, battery, frame drops (full history).
   try {
     const activeLog = await getActiveLog(selectedDevice, "vcat_d");

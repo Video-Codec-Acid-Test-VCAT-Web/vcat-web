@@ -414,7 +414,13 @@ def list_installed_packages(session_id: str, device_id: str) -> set:
     return packages
 
 
-def get_battery_level(device_id):
+def get_battery_status(device_id):
+    """(level %, temperature °C) from one `dumpsys battery`.
+
+    `temperature` is reported in tenths of a degree. Either element is None if the
+    device didn't report it.
+    """
+    level, temp_c = None, None
     try:
         result = subprocess.run(
             ["adb", "-s", device_id, "shell", "dumpsys", "battery"],
@@ -423,11 +429,19 @@ def get_battery_level(device_id):
             check=True,
         )
         for line in result.stdout.splitlines():
-            if "level:" in line:
-                return int(line.strip().split(":")[1].strip())
+            key, _, value = line.strip().partition(":")
+            value = value.strip()
+            if key == "level" and level is None:
+                level = int(value)
+            elif key == "temperature" and temp_c is None:
+                temp_c = int(value) / 10.0
     except Exception as e:
         logger.error(f"[Battery Error] {e}")
-    return None
+    return level, temp_c
+
+
+def get_battery_level(device_id):
+    return get_battery_status(device_id)[0]
 
 
 def get_system_memory(device_id):

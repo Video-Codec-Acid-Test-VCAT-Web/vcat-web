@@ -522,6 +522,40 @@ Both are available on a **single-log** panel and on a comparison, driven by one
 
 ---
 
+## Q. Live temperature from ADB
+
+The Temperature graph existed only on the log-file views and on vcat-ai live (which reads
+it from the log) — a **vcat-d live** session had no temperature at all, because the worker
+collected neither battery temp nor the thermal status.
+
+### `vcat_adb.py`
+- `get_battery_status(device_id)` → `(level %, temperature °C)` from **one** `dumpsys
+  battery` (temperature is reported in tenths of a degree). `get_battery_level()` is kept
+  as a thin wrapper.
+
+### `vcat_telemetry.py`
+- `parse_thermal_dumpsys(out, elapsed)` → `(per-zone ThermalStatus | None, overall 0–5
+  status | None)`, split out of `get_thermal_status()` so it can be tested without a
+  device. One `dumpsys thermalservice` call now yields both; the `Thermal Status:` line is
+  matched wherever it appears, and the parser takes the **Current temperatures from HAL**
+  block rather than the `Cached temperatures` block printed above it.
+- `telemetry_worker()` fills `BatteryEntry.battery_temp` and appends
+  `SystemThermalStatus` entries, so `build_telemetry_response` emits the same
+  `battery_temp` / `system_thermal` series the file views use.
+- The live Battery sheet row is now `[elapsed, level, None, None, temp]` — it was
+  `[elapsed, level]` against a five-column header, so temperature would have landed in the
+  charge-counter column.
+
+### `static/main.js`
+- `fetchAndUpdateTelemetry()` injects the Temperature chart on the first poll
+  (`injectTempChart` is idempotent — the canvas isn't in the template) and draws it from
+  the **worker** payload, not the log, so it appears regardless of what the app is logging.
+
+Charted series are battery °C plus the normalized 0–5 status, matching the log-file view so
+the comparison grid still pairs the two by title.
+
+---
+
 ## P. Smaller fixes
 
 - **Tooltip elapsed time**: hover text shows the raw x value *and* a clock form —
@@ -546,8 +580,10 @@ Both are available on a **single-log** panel and on a comparison, driven by one
   Excel export no longer accumulates frame drops from the worker (they live in the log).
 - **Inference CPU (~1 s) dwarfs Inference (~0.24 s)** on the shared AI Processing Time
   chart's scale — may want a secondary axis / separate chart.
-- **Temperature graph is on the log-file views (and vcat-ai live) only** — the vcat-d
-  **live** worker doesn't collect battery temp or system thermal.
+- **Per-zone thermal temperatures are device-dependent.** `dumpsys thermalservice` reports
+  whatever the HAL exposes — a Galaxy S25 gives only `skin`, no cpu/gpu/soc. They are
+  collected and exported to Excel but not charted; the live Temperature graph uses battery
+  temp + the 0–5 status instead, which every device reports (see § Q).
 - **`getDeviceRootFolder` / `/api/device/root_folder`** (the vcat-d broadcast path) are now
   unused for listings (superseded by the scan) — left in place, safe to remove.
 - **`transform.inference_cpu_time`** older logs stored tiny values (non-ns); newer logs use
