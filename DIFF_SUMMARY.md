@@ -19,10 +19,18 @@ round-trip fix; and (K) **usable with no device attached** — open local files,
 API, content-based app detection; and (L) **unit consistency** — memory in KB, battery in
 percent; and (M) **log-format compatibility** with vcat-d ≥ 3006 (object `playlist`,
 `execution_id`); and (N) **result comparison** — N logs side by side, one row per metric;
-and (O) **exports** — PDF report and per-hour `.xlsx` from any view.
+and (O) **exports** — PDF report and per-hour `.xlsx` from any view; and
+(R) **device-folder discovery fix** — the `/sdcard` scan now works on any folder name; and
+(S) **per-cluster CPU frequency** — large and small cores on separate graphs; and
+(T) **richer spreadsheet** — stacked sheets (System Health), CPU-cluster and frame-drop
+sheets, and one verbatim sheet per source log; and (U) **runs labelled by decoder** rather
+than codec family; and (V) **audioClock** in Test Details; and (W) **dropped_to_keyframe**
+on the frame-drops graph; and (X) **device identity pinned** in the comparison header; and
+(Y) **live-session UX** — ramped polling and Disconnect on the live tab; and
+(Z) **standalone HTML export** — N logs in one self-contained interactive file.
 (A/B → `4fa2a5b`; C → `237b96a`; D → `61898ff`; E → `038ea4a`; F → `233d5d3`;
 G → `72f3786` (+ `1acbfdb`); H → `5ff0c88`/`36cfcd3`; I → `072d296`; J → `d4a15aa`;
-K–P are the current change.)
+K–Q → `3be5654`/`025ab30`/`13a6dca`; R–Z are the current change.)
 
 ---
 
@@ -569,6 +577,177 @@ the comparison grid still pairs the two by title.
 - `run_info` added to both response builders (device, SoC vendor/name, Android, vcat version,
   playlist + id, execution id) — the metadata source for both exports.
 
+## R. Device data-folder discovery (`/sdcard` scan)
+
+### Problem addressed
+A device whose vcat-d folder was named `vcat` (the pre-rename name) showed up in the UI
+with no telemetry files at all, while vcat-ai on the same device worked.
+
+### Root cause
+`/sdcard` is a symlink to `/storage/self/primary`, and toybox `find` does not follow a
+symlink given as the **starting path**. So `find /sdcard -maxdepth 6 -type d -name
+test_results` returned nothing on-device, and `scan_vcat_data_folders()` fell back to its
+hard-coded defaults — which listed `/sdcard/vcat-d` and `/sdcard/vcat-ai` but not
+`/sdcard/vcat`. vcat-ai matched a default and worked; vcat-d did not and vanished.
+
+### `vcat_adb.py`
+- `find /sdcard/` (trailing slash) — makes `find` resolve the symlink and descend. This is
+  the actual fix and works for **any** folder name, not just the two defaults.
+- `/sdcard/vcat` added to the fallback list, for devices where `find` is unavailable.
+
+Verified on CPH2625: `vcat_d` resolves to `/sdcard/vcat/test_results` (128 logs).
+
+---
+
+## S. CPU frequency split into large / small cores
+
+One frequency graph became two. "Small" is the **lowest-clocked cluster**; every other core
+is large, so a three-cluster SoC groups mid and prime together.
+
+### `vcat_telemetry.py`
+- `_core_classes()` maps `core<N>` → `small`/`large` from each core's max clock, carried in
+  `telemetry_data.core_classes`. Returns `{}` for a homogeneous CPU or a log header with no
+  per-core block, so the client can fall back.
+
+### `static/main.js`
+- `splitCoreKeys()` prefers the server map and otherwise infers the split from the peak
+  frequency each core reached. Core keys are matched on the **trailing index**: the live
+  worker emits `core0…`, but a log's `cpu.freq0…` columns arrive as `freq0…`, so a
+  name-equality lookup silently missed on every log file.
+- `coreKeysOf()` takes the core list from the newest **populated** sample rather than the
+  last one, so a truncated final row can't drop the whole series.
+- A homogeneous CPU hides the small chart and retitles the other to plain
+  "CPU Frequency (MHz)" rather than claiming a split that isn't there.
+
+---
+
+## T. Spreadsheet export: stacked sheets, new metrics, raw logs
+
+### `vcat_telemetry_writer.py`
+- A sheet entry may now be `{sheet, blocks: [{metric, unit, rows}, …]}` as well as the old
+  single `{metric, unit, rows}`. `_write_metric_block()` returns a row cursor that clears
+  the preceding chart (a 10 cm chart ≈ 20 rows), so stacked charts don't collide.
+- `_write_raw_csv_sheet()` dumps a log verbatim: JSON header in column A (its commas would
+  otherwise shred it across cells), then the table parsed into real columns with numbers
+  stored as numbers. `_unique_sheet_title()` handles two logs sharing a file name.
+
+### New sheets
+- **System Health** (was "Temperature") — battery temperature above system thermal status,
+  each with its own chart. Status is written as logged (0–5), not rescaled the way the
+  on-screen chart normalises it against the battery axis.
+- **CPU Frequency – Large / Small Cores** — the mean clock across that cluster at the hour
+  mark. Cores are classified per log, so a comparison spanning two SoCs is still correct.
+- **Frame Drops** — Frame Drops above Dropped to Keyframe.
+- **One sheet per source log**, verbatim, after the charts.
+
+### `vcat_telemetry.py`
+- `_raw_log_sheets()` resolves each source **server-side** (saved file or `adb pull`) — the
+  files already sit on the host, so there's no reason to round-trip CSV through the
+  browser. An unresolvable source is skipped with a log line rather than failing the export.
+
+### Frame Drops aggregates, every other sheet samples
+`buildHourlySumTable()` **sums** each hour. A drop count is an event tally, not a level, so
+the "reading nearest the hour mark" rule would report one arbitrary second as the hour. On
+`logs_1765070594349.csv` the sum shows 760 of 769 drops in hour 4; sampling showed 0 there.
+Hours past a log's end stay blank, not 0 — "no data", not "no drops". A block whose rows
+are entirely null (e.g. `dropped_to_keyframe` on a pre-3004 run) is dropped rather than
+written as a sheet of blank cells.
+
+---
+
+## U. Runs labelled by decoder, not codec family
+
+`comparisonSeriesLabels()` now leads with `videoDecoder` ("vcat-dav1d-1.5.1") instead of the
+uppercased codec family ("AV1"), which every AV1 decoder shares. Flows to chart legends,
+PDF, spreadsheet column headers and export filenames at once. vcat-ai logs record no
+decoder name, so those fall back to the codec family rather than "unknown". `codec` moved
+to the front of the tie-break chain, since `decoder` — previously first — can no longer
+disambiguate anything.
+
+---
+
+## V. `audioClock` in Test Details
+
+`TestConditions.audioClock` is `Optional[bool]`, surfaced via `_test_conditions()` in both
+response builders and shown as a Yes/No row in the panel.
+
+Detected by **presence**, not `header_version >= 3004`, following the lesson already
+recorded for the playlist object: a pre-release build can emit a field before the header
+version that formalises it. A pre-3004 log reports `None`, **not** `False` — otherwise
+every old run would read as "audio clock off" when the log simply never said — and the row
+is hidden rather than shown blank.
+
+---
+
+## W. `dropped_to_keyframe` on the frame-drops graph
+
+`FramedropEntry.dropped_to_keyframe` (`Optional[int]`, header 3004 on) plumbed through the
+reader and `build_telemetry_response`, and drawn as a second series when any sample reports
+a number. A log predating the column gets **one** line, not a flat zero implying none
+occurred. Frame Drops is orange (`COLORS[4]`), Dropped to Keyframe red (`COLORS[0]`).
+
+---
+
+## X. Device identity pinned in the comparison header
+
+Guessing which device a column came from was previously only possible from the file name.
+`compareColumnHead()` now carries a Device / SoC / Android block, filled by
+`fillCompareDeviceHead()` once payloads resolve (the bar is built before the logs are read).
+It sits in `.compare-heads`, which was already `position: sticky`, so it stays on screen
+while the chart rows scroll. Values come from `run_info`; nothing new was plumbed. Android
+is recorded as a bare `"14 (32-bit)"`, so it is prefixed — with a guard against
+"Android Android 14". A field the log lacks shows `—`, keeping rows aligned across columns.
+
+---
+
+## Y. Live-session UX: ramped polling, Disconnect on the live tab
+
+### `startBackoffPoll()` replaces the fixed intervals
+First refresh lands at **1 s** instead of one whole interval (30 s for vcat-d), then the gap
+grows ×1.8 to each app's previous steady rate — 30 s for vcat-d, 5 s for vcat-ai, so neither
+regresses. `setTimeout` and `setInterval` share one timer list, so the existing
+`clearInterval(...)` teardowns work untouched; the loop re-checks its liveness handle both
+before running a tick and before rescheduling. Each tick is awaited, so a slow refresh can
+no longer have a second request stacked on it the way `setInterval` allowed.
+
+### Disconnect on the live monitor tab
+Ending a session no longer means navigating back to the device panel. The toolbar is shared
+with file and comparison tabs, so the button only appears on a tab whose app is live,
+resolved per-tab via `tabIdFromNode`, and routes to the matching app's existing
+confirm-and-offer-snapshot prompt.
+
+### `stopVcatdLive()` restores the device tab
+Removing the pane the user was on left the vcat-d panel with **no visible tab**, which only
+looked fixable by reloading. It now falls back to the device tab the way
+`handleAiDisconnectClick()` already did — but only when the live tab was the active one, so
+an unplug while reading a file tab doesn't yank the view away.
+
+---
+
+## Z. Standalone HTML export
+
+`⤓ Save HTML` on both toolbars, for a single log **or** N logs. One self-contained file —
+stylesheet, Chart.js and data inlined — that opens from disk with no server and no network,
+with real canvases rather than pictures of them. No 2-log cap: the panel already scrolls
+horizontally at a 420 px floor per column, and the export reuses that CSS.
+
+- **Charts are lifted off the live `Chart` instances** (`serializeChart()`), so the export
+  cannot drift from what is on screen. Axis settings travel too — `stepSize`, `min`,
+  the 0–100 clamp. Tick and tooltip **callbacks are functions and cannot survive JSON**, so
+  the export restates them: without this the x axis rendered raw elapsed seconds instead of
+  `hh:mm`.
+- **Decimation** keeps ~1500 points per series: ~0.8 MB per log against ~14 MB for every
+  sample. Rather than striding, it buckets and keeps each bucket's max **and** min of the
+  combined series, so spikes survive (verified: a lone 9999 in 27,342 points is retained).
+- **Zoom is off**, matching the panel's `zoom: false` — and zooming decimated data would
+  imply precision it does not have. The zoom plugin is therefore not inlined (0.45 → 0.28 MB).
+- **Chart.js is vendored** to `static/vendor/` and `index.html` now loads it from there
+  rather than the CDN: the export has to read those bytes same-origin, and the app gains
+  offline operation. **jsPDF is still CDN-loaded**, so PDF export alone still needs a
+  network connection.
+
+---
+
 ## ⚠️ Notes before pushing
 
 - **Debug timing values** are currently in place and should likely be reverted:
@@ -588,15 +767,17 @@ the comparison grid still pairs the two by title.
   unused for listings (superseded by the scan) — left in place, safe to remove.
 - **`transform.inference_cpu_time`** older logs stored tiny values (non-ns); newer logs use
   ns. Missing/unparseable values render as 0.
-- **PDF is capped at two logs** (`PDF_MAX_COLUMNS`); the spreadsheet has no limit.
+- **PDF is capped at two logs** (`PDF_MAX_COLUMNS`); the spreadsheet and the HTML
+  export have no limit (see § Z).
 - **`chartOptions()` is declared twice** in `static/main.js` and the **second** declaration
   is the effective one. Edits to the first have no effect — it should be deleted.
 - **Exports need a loaded payload**, so they are disabled on the **live** tab (same rule as
   Compare To); snapshot first.
 - **Excel/`.xlsx` produced before § L** carry memory in bytes and battery as a 0–1 fraction.
-- **Hourly sheets sample, not aggregate.** Battery moves slowly so the reading at the hour
-  mark is representative; temperature does not, so a per-hour min/avg/max would describe
-  thermal behaviour better if that becomes the point of interest.
+- **Hourly sheets sample, not aggregate** — except Frame Drops, which sums (§ T). Battery
+  moves slowly so the reading at the hour mark is representative; temperature does not, so
+  a per-hour min/avg/max would describe thermal behaviour better if that becomes the point
+  of interest.
 - **Focus-mode filmstrip thumbnails** still clip Test Details text (a 150 px-tall preview
   with `overflow: hidden`); § P improved but did not eliminate the overhang.
 - **PDF charts keep the app's dark theme** (the card colour is painted behind each

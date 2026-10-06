@@ -110,6 +110,13 @@ class TestConditions:
     runMode: str
     screenBrightness: int
     threads: int
+    # Whether the run drove playback off the audio clock. Added in header 3004, so
+    # None (not False) for anything older — "the log never said" and "the log said
+    # off" have to stay distinguishable, or every pre-3004 run reads as audio-clock
+    # off. Detected by presence rather than by header_version >= 3004, following
+    # the playlist-object lesson below: a pre-release build can emit a field before
+    # the header version that formalises it.
+    audioClock: Optional[bool] = None
 
     @staticmethod
     def empty() -> "TestConditions":
@@ -118,7 +125,8 @@ class TestConditions:
             runLimit=0,
             runMode="",
             screenBrightness=0,
-            threads=0
+            threads=0,
+            audioClock=None,
         )
 
     @staticmethod
@@ -127,12 +135,14 @@ class TestConditions:
         if not d:
             return TestConditions.empty()
         decoder_dict = d.get("decoderCfg", {}).get("decoderConfig", {})
+        raw_clock = d.get("audioClock")
         return TestConditions(
             decoderConfig=DecoderConfig.from_dict(decoder_dict),
             runLimit=d.get("runLimit", 0),
             runMode=d.get("runMode", ""),
             screenBrightness=d.get("screenBrightness", 0),
-            threads=d.get("threads", 0)
+            threads=d.get("threads", 0),
+            audioClock=None if raw_clock is None else bool(raw_clock),
         )
 
     def to_dict(self) -> Dict:
@@ -259,6 +269,10 @@ class BatteryEntry:
 class FramedropEntry:
     elapsed_time: float = 0.0
     delta_framedrops: int = 0
+    # Drops severe enough that playback resynced at the next keyframe. Logged from
+    # header 3004 on; None for older logs, which is not the same as a run that
+    # reported zero of them.
+    dropped_to_keyframe: Optional[int] = None
 
 
 @dataclass

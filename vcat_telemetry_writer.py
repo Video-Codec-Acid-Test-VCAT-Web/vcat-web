@@ -358,21 +358,51 @@ def cleanup_all_workbooks():
 atexit.register(cleanup_all_workbooks)
 
 
-def _write_metric_sheet(
+# A chart is 10 cm tall, which covers roughly 20 default-height rows. A block that
+# follows one has to clear that or the two charts land on top of each other.
+_CHART_ROWS = 21
+
+# Excel rejects these in a sheet name, and caps the name at 31 characters.
+_BAD_SHEET_CHARS = "[]:*?/" + chr(92)
+
+
+def _safe_sheet_title(title: str, index: int) -> str:
+    clean = "".join(" " if c in _BAD_SHEET_CHARS else c for c in title).strip()
+    return clean[:31] or f"Metric {index + 1}"
+
+
+def _unique_sheet_title(title: str, index: int, used: set) -> str:
+    """Excel rejects duplicate sheet names, and two logs can share a file name."""
+    base = _safe_sheet_title(title, index)
+    if base not in used:
+        return base
+    for n in range(2, 100):
+        suffix = f" ({n})"
+        if (cand := base[:31 - len(suffix)] + suffix) not in used:
+            return cand
+    return base[:28] + f"{index:03d}"
+
+
+def _write_metric_block(
     ws: Worksheet,
+    start_row: int,
     metric: str,
     unit: str,
     series_labels: List[str],
     rows: List[List[Any]],
     info_rows: List[List[Any]] = None,
-) -> None:
-    """One metric per sheet: run description above, then the chartable table."""
+) -> int:
+    """Write one heading + table + chart starting at `start_row`.
+
+    Returns the first free row below the block, far enough down to clear the chart
+    so a following block on the same sheet does not collide with it.
+    """
     from openpyxl.chart import LineChart, Reference
 
-    title = ws.cell(row=1, column=1, value=f"{metric} — per-hour comparison")
+    title = ws.cell(row=start_row, column=1, value=f"{metric} — per-hour comparison")
     title.font = Font(bold=True, size=13)
 
-    row_at = 3
+    row_at = start_row + 2
     for label, *values in info_rows or []:
         cell = ws.cell(row=row_at, column=1, value=label)
         cell.font = Font(bold=True)
@@ -410,6 +440,80 @@ def _write_metric_sheet(
         chart.set_categories(cats)
         ws.add_chart(chart, f"{get_column_letter(3 + len(series_labels))}{table_row}")
 
+    return max(table_row + len(rows), table_row + _CHART_ROWS) + 2
+
+
+def _write_metric_sheet(
+    ws: Worksheet,
+    blocks: List[Dict[str, Any]],
+    series_labels: List[str],
+    info_rows: List[List[Any]] = None,
+) -> None:
+    """One topic per sheet, stacked top to bottom: each block is a heading, a
+    chartable per-hour table and its line chart. The run-description block is
+    written once, above the first table, since it describes the whole sheet."""
+    row = 1
+    for i, block in enumerate(blocks):
+        row = _write_metric_block(
+            ws, row,
+            str(block.get("metric") or f"Metric {i + 1}"),
+            str(block.get("unit") or ""),
+            series_labels,
+            block.get("rows") or [],
+            info_rows if i == 0 else None,
+        )
+
+
+# The CSV table starts at the header row; everything above it is the JSON block.
+_CSV_HEADER_MARKER = "test.timestamp"
+
+# Excel's hard ceiling is 1,048,576 rows. Leave room for the note we append.
+_RAW_MAX_ROWS = 1_000_000
+
+
+def _write_raw_csv_sheet(ws: Worksheet, text: str) -> None:
+    """Dump a log file verbatim onto a sheet: the JSON header block in column A
+    (its commas would otherwise shred it across cells), then the telemetry table
+    parsed into real columns so it can be filtered and charted like any sheet."""
+    import csv as _csv
+
+    lines = (text or "").splitlines()
+    start = next(
+        (i for i, ln in enumerate(lines) if ln.startswith(_CSV_HEADER_MARKER)),
+        None,
+    )
+    # No recognisable table (truncated file?) — write it all as plain text rather
+    # than guessing at a delimiter.
+    header_lines = lines if start is None else lines[:start]
+    table_lines = [] if start is None else lines[start:]
+
+    row_at = 1
+    for ln in header_lines:
+        if row_at > _RAW_MAX_ROWS:
+            break
+        ws.cell(row=row_at, column=1, value=ln[:32767])
+        row_at += 1
+
+    truncated = False
+    for cells in _csv.reader(table_lines):
+        if row_at > _RAW_MAX_ROWS:
+            truncated = True
+            break
+        for col, v in enumerate(cells, start=1):
+            # Numbers land as numbers so the sheet is chartable; anything else
+            # stays text (timestamps, file paths, booleans).
+            try:
+                ws.cell(row=row_at, column=col, value=float(v))
+            except (TypeError, ValueError):
+                ws.cell(row=row_at, column=col, value=(v or "")[:32767])
+        row_at += 1
+
+    if truncated:
+        ws.cell(row=row_at, column=1,
+                value=f"[truncated at {_RAW_MAX_ROWS} rows — Excel's row limit]")
+
+    ws.column_dimensions["A"].width = 26
+
 
 def write_comparison_workbook(
     out_path: str,
@@ -417,27 +521,37 @@ def write_comparison_workbook(
     sheets: List[Dict[str, Any]],
     notes: List[str] = None,
     info_rows: List[List[Any]] = None,
+    raw_sheets: List[Dict[str, Any]] = None,
 ) -> str:
     """Write one per-hour comparison sheet per metric, each ready to chart.
 
-    `sheets` is [{metric, unit, rows}, ...] — one worksheet each, in order. Above
-    every table sits the same block describing each run (codec, input format,
+    `sheets` is one worksheet per entry, in order. An entry is either a single
+    metric — {metric, unit, rows} — or several stacked on one sheet:
+    {sheet, blocks: [{metric, unit, rows}, ...]}, which is how System Health
+    carries battery temperature above system thermal status.
+
+    Above the first table sits the block describing each run (codec, input format,
     device, SoC), one column per series so it lines up with the data underneath, so
-    a sheet still makes sense on its own. The table itself is a plain rectangular
-    range — hour in column A, one series per following column — with the series
-    labels on its header row so a chart picks them up as its legend. Missing
-    samples are left as empty cells rather than 0, which would otherwise plot as a
-    drop to zero.
+    a sheet still makes sense on its own. Each table is a plain rectangular range —
+    hour in column A, one series per following column — with the series labels on
+    its header row so a chart picks them up as its legend. Missing samples are left
+    as empty cells rather than 0, which would otherwise plot as a drop to zero.
     """
     wb = Workbook()
     for i, spec in enumerate(sheets):
-        metric = str(spec.get("metric") or f"Metric {i + 1}")
+        blocks = spec.get("blocks") or [spec]
+        title = str(spec.get("sheet") or spec.get("metric") or f"Metric {i + 1}")
         ws = cast(Worksheet, wb.active) if i == 0 else wb.create_sheet()
-        ws.title = metric[:31] or f"Metric {i + 1}"
-        _write_metric_sheet(
-            ws, metric, str(spec.get("unit") or ""), series_labels,
-            spec.get("rows") or [], info_rows,
-        )
+        ws.title = _safe_sheet_title(title, i)
+        _write_metric_sheet(ws, blocks, series_labels, info_rows)
+
+    # One sheet per source log, after the charts: the summary tables resample to
+    # the hour, so the raw rows are the only way back to the underlying samples.
+    used = {ws.title for ws in wb.worksheets}
+    for i, raw in enumerate(raw_sheets or []):
+        title = _unique_sheet_title(str(raw.get("sheet") or f"Raw {i + 1}"), i, used)
+        used.add(title)
+        _write_raw_csv_sheet(wb.create_sheet(title), raw.get("text") or "")
 
     if notes:
         info = wb.create_sheet("About")
@@ -447,5 +561,6 @@ def write_comparison_workbook(
 
     wb.save(out_path)
     logger.info(
-        f"📁 Wrote comparison workbook ({len(sheets)} metric sheets): {out_path}")
+        f"📁 Wrote comparison workbook ({len(sheets)} metric sheets, "
+        f"{len(raw_sheets or [])} raw log sheets): {out_path}")
     return out_path

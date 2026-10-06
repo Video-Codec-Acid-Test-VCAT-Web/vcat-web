@@ -837,9 +837,41 @@ html, body {
   border-radius: 8px 8px 0 0;
   font-family: monospace;
   font-size: 13px;
+  overflow: hidden;
+}
+
+.cmp-col-name {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+/* Device identity for the column, pinned with the header bar so it stays on
+   screen however far down the chart rows you scroll. */
+.cmp-col-device {
+  margin-top: 6px;
+  display: grid;
+  gap: 2px;
+  font-size: 12px;
+}
+
+.cmp-dev-row {
+  display: flex;
+  gap: 8px;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.cmp-dev-label {
+  flex: 0 0 auto;
+  min-width: 58px;
+  color: #0a7;
+}
+
+.cmp-dev-value {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: #ddd;
 }
 
 .cmp-col-tag {

@@ -178,7 +178,14 @@ def _read_frame_drops(elapsed_time: float, row: dict) -> FramedropEntry:
     if value is None:
         raise ValueError("Missing 'video.frames_dropped'")
 
-    return FramedropEntry(elapsed_time=elapsed_time, delta_framedrops=parse_int(value))
+    # Added alongside frames_dropped in header 3004. Absent in older logs, where it
+    # stays None so the chart can leave the series out rather than draw a flat zero.
+    keyframe = row.get("video.dropped_to_keyframe")
+    return FramedropEntry(
+        elapsed_time=elapsed_time,
+        delta_framedrops=parse_int(value),
+        dropped_to_keyframe=None if keyframe in (None, "") else parse_int(keyframe),
+    )
 
 
 # The app logs memory in BYTES, while the ADB worker (/proc/meminfo, dumpsys

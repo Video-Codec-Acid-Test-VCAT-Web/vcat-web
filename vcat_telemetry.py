@@ -1663,6 +1663,41 @@ def _run_info(telemetry) -> dict:
     }
 
 
+def _core_classes(telemetry) -> dict:
+    """Map "core<N>" -> "small" | "large" using each core's maximum clock.
+
+    "Small" is the lowest-clocked cluster; every other core is large, so on a
+    three-cluster SoC the mid and prime cores group together as large. Returns {}
+    when the cores are homogeneous or their clocks are unknown (a log whose header
+    lacks the per-core block) — the client then infers the split from the observed
+    frequencies, and falls back to a single chart if there is no split to find.
+    """
+    di = getattr(telemetry, "device_info", None)
+    cores = getattr(getattr(di, "cpu", None), "cores", None) or []
+    clocked = [c for c in cores if getattr(c, "frequency_mhz", 0)]
+    if len({c.frequency_mhz for c in clocked}) < 2:
+        return {}
+    smallest = min(c.frequency_mhz for c in clocked)
+    return {
+        f"core{c.core_id}": "small" if c.frequency_mhz == smallest else "large"
+        for c in clocked
+    }
+
+
+def _test_conditions(telemetry) -> dict:
+    """Run settings from the log header, for the Test Details panel. Fields absent
+    from older headers come back as None so the client can omit them rather than
+    show a default that the log never actually recorded."""
+    tc = getattr(telemetry, "test_conditions", None)
+    return {
+        "runMode": getattr(tc, "runMode", "") or "",
+        "runLimit": getattr(tc, "runLimit", 0) or 0,
+        "screenBrightness": getattr(tc, "screenBrightness", 0) or 0,
+        "threads": getattr(tc, "threads", 0) or 0,
+        "audioClock": getattr(tc, "audioClock", None),
+    }
+
+
 def build_ai_telemetry_response(telemetry, device_id: str) -> dict:
     """Response for vcat-ai telemetry (VcataiTelemetryData): common series
     (no frame drops) plus the AI processing-time series."""
@@ -1677,6 +1712,7 @@ def build_ai_telemetry_response(telemetry, device_id: str) -> dict:
         "device_id": device_id,
         "test_details": asdict(telemetry.test_details),
         "run_info": _run_info(telemetry),
+        "test_conditions": _test_conditions(telemetry),
         # Raw vcat-ai test object (name/id/createdAt/testCases[...]) for the panel.
         "ai_test": telemetry.session_info.test,
         "telemetry_data": {
@@ -1700,6 +1736,7 @@ def build_ai_telemetry_response(telemetry, device_id: str) -> dict:
                 {"elapsed_time": e.elapsed_time, **e.usage_pct}
                 for e in getattr(telemetry, "gpu_usage", []) or []
             ],
+            "core_classes": _core_classes(telemetry),
             "cpu_freq": [
                 {"elapsed_time": e.elapsed_time, "frequencies": e.frequencies}
                 for e in telemetry.cpu_freq
@@ -1729,6 +1766,7 @@ def build_telemetry_response(telemetry, device_id: str) -> dict:
         "device_id": device_id,
         "test_details": asdict(telemetry.test_details),
         "run_info": _run_info(telemetry),
+        "test_conditions": _test_conditions(telemetry),
         "telemetry_data": {
             "battery": [
                 {"elapsed_time": entry.elapsed_time, "level": entry.level}
@@ -1763,6 +1801,7 @@ def build_telemetry_response(telemetry, device_id: str) -> dict:
                 }
                 for entry in telemetry.cpu_usage
             ],
+            "core_classes": _core_classes(telemetry),
             "cpu_freq": [
                 {
                     "elapsed_time": entry.elapsed_time,
@@ -1788,6 +1827,7 @@ def build_telemetry_response(telemetry, device_id: str) -> dict:
                 {
                     "elapsed_time": entry.elapsed_time,
                     "delta_framedrops": entry.delta_framedrops,
+                    "dropped_to_keyframe": getattr(entry, "dropped_to_keyframe", None),
                 }
                 for entry in telemetry.frame_drops
             ],
@@ -2211,6 +2251,41 @@ def api_upload_session(session_id):
     return jsonify({"status": "ok", "name": name, "app": _detect_app_from_file(path, name)})
 
 
+def _raw_log_sheets(session_id, raw_sources) -> list:
+    """Read each source log so it can be embedded verbatim in the workbook.
+
+    Resolved server-side rather than uploaded by the client: the files already sit
+    on the host (or on the device, one adb pull away), so there's no reason to
+    round-trip megabytes of CSV through the browser. A source that can't be read
+    is skipped with a log line — a missing raw sheet shouldn't cost the user the
+    whole export."""
+    out = []
+    for src in raw_sources or []:
+        path = str(src.get("path") or "")
+        if not path:
+            continue
+        label = str(src.get("label") or os.path.basename(path))
+        try:
+            if src.get("kind") == "device":
+                device_id = str(src.get("device") or "")
+                if not device_id:
+                    continue
+                local = get_device_file(
+                    session_id=session_id, device_id=device_id,
+                    device_file_path=path, force_temp=True,
+                )
+            else:
+                local = _resolve_saved_file(path)
+            if not local or not os.path.isfile(local):
+                logger.warning(f"raw sheet: could not resolve {path}")
+                continue
+            with open(local, "r", encoding="utf-8", errors="replace") as fh:
+                out.append({"sheet": label, "text": fh.read()})
+        except Exception as e:
+            logger.warning(f"raw sheet for {path} failed: {e}")
+    return out
+
+
 @app.route("/api/vcat_monitor/comparison_workbook", methods=["POST"])
 @require_valid_session
 def api_comparison_workbook(session_id):
@@ -2234,13 +2309,23 @@ def api_comparison_workbook(session_id):
 
     specs = []
     for spec in sheets:
-        rows = spec.get("rows") or []
-        if not rows:
+        # A sheet is either one metric or several stacked on the same worksheet.
+        blocks = spec.get("blocks") or [spec]
+        clean = []
+        for b in blocks:
+            rows = b.get("rows") or []
+            if not rows:
+                continue
+            clean.append({
+                "metric": str(b.get("metric") or "Comparison"),
+                "unit": str(b.get("unit") or ""),
+                "rows": [[cell(r[0])] + [cell(v) for v in r[1:]] for r in rows if r],
+            })
+        if not clean:
             continue
         specs.append({
-            "metric": str(spec.get("metric") or "Comparison"),
-            "unit": str(spec.get("unit") or ""),
-            "rows": [[cell(r[0])] + [cell(v) for v in r[1:]] for r in rows if r],
+            "sheet": str(spec.get("sheet") or clean[0]["metric"]),
+            "blocks": clean,
         })
     if not specs:
         return jsonify({"status": "error", "message": "No table data provided"}), 400
@@ -2254,6 +2339,7 @@ def api_comparison_workbook(session_id):
             specs,
             body.get("notes") or [],
             body.get("info_rows") or [],
+            _raw_log_sheets(session_id, body.get("raw_sources")),
         )
         name_root = re.sub(r"[^A-Za-z0-9._-]", "_", str(body.get("name") or "comparison"))
         return send_file(

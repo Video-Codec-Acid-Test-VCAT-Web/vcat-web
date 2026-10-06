@@ -5,8 +5,11 @@
     <title>VCAT Remote Monitor</title>
     <link href="/static/style.css" rel="stylesheet" />
     <link href="/static/favicon.png" rel="icon" type="image/x-icon" />
-    <script defer src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
-    <script defer src="https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@2.0.1/dist/chartjs-plugin-zoom.min.js"></script>
+    <!-- Vendored rather than CDN-loaded: the standalone HTML export inlines these,
+         so they have to be fetchable from this origin, and the app keeps working
+         on a bench machine with no internet. -->
+    <script defer src="/static/vendor/chart.umd.min.js"></script>
+    <script defer src="/static/vendor/chartjs-plugin-zoom.min.js"></script>
     <script defer src="https://cdn.jsdelivr.net/npm/jspdf@2.5.2/dist/jspdf.umd.min.js"></script>
     <script defer src="/static/main.js"></script>
 </head>
@@ -247,6 +250,8 @@
                         title="Save this view — header plus every chart — as a PDF">⤓ Save PDF</button>
                 <button type="button" class="cmp-pdf-btn" data-export="xlsx" onclick="exportFromBtn(this,'xlsx')" disabled
                         title="Save per-hour battery and temperature tables (.xlsx), ready to chart">⤓ Save Spreadsheet</button>
+                <button type="button" class="cmp-pdf-btn" data-export="html" onclick="exportFromBtn(this,'html')" disabled
+                        title="Save this view as a standalone interactive HTML file">⤓ Save HTML</button>
                 <select class="compare-select" onchange="handleCompareSelect(this)" disabled
                         title="Open a saved or on-device log to compare results">
                     <option value="" selected>⇄ Compare To…</option>
@@ -254,7 +259,12 @@
                     <option value="local">Browse local file…</option>
                 </select>
             </div>
-            <div class="telemetry-status" style="color: #ccc; font-size: 14px;"></div>
+            <div style="display: flex; gap: 12px; align-items: center;">
+                <button type="button" class="cmp-pdf-btn tele-disconnect-btn"
+                        onclick="disconnectFromBtn(this)" style="display: none;"
+                        title="Disconnect this live session">⏻ Disconnect</button>
+                <div class="telemetry-status" style="color: #ccc; font-size: 14px;"></div>
+            </div>
         </div>
 
         <div class="dashboard-grid" style="
@@ -278,6 +288,9 @@
                     </div>
                     <div style="display: flex; gap: 8px; margin-bottom: 6px;">
                         <label>Playlist:</label> <input class="test-playlist" readonly />
+                    </div>
+                    <div class="test-audio-clock-row" style="display: flex; gap: 8px; margin-bottom: 6px;">
+                        <label>Audio Clock:</label> <input class="test-audio-clock" readonly />
                     </div>
 
                     <fieldset class="current-test-video">
@@ -309,8 +322,12 @@
                 <canvas class="cpuChart" data-id="cpuChart"></canvas>
             </div>
             <div class="chart-wrapper">
-                <h3>CPU Frequency (MHz)</h3>
+                <h3>CPU Frequency - Large Cores (MHz)</h3>
                 <canvas class="freqChart" data-id="freqChart"></canvas>
+            </div>
+            <div class="chart-wrapper">
+                <h3>CPU Frequency - Small Cores (MHz)</h3>
+                <canvas class="freqChartSmall" data-id="freqChartSmall"></canvas>
             </div>
             <div class="chart-wrapper">
                 <h3>Memory Usage (MB)</h3>

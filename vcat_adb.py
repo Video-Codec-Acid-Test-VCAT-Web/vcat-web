@@ -359,10 +359,13 @@ def scan_vcat_data_folders(session_id: str, device_id: str) -> dict:
         {"vcat_d": {"root": "...", "test_results": ".../test_results"},
          "vcat_ai": {"root": "...", "test_results": ".../test_results"}}
     """
+    # The trailing slash on /sdcard/ is required, not cosmetic: /sdcard is a
+    # symlink to /storage/self/primary, and toybox find does not follow a symlink
+    # given as the starting path, so `find /sdcard` silently returns nothing.
     # find can exit non-zero on permission-denied dirs; don't use check=True.
     find = subprocess.run(
         ["adb", "-s", device_id, "shell",
-         "find /sdcard -maxdepth 6 -type d -name test_results 2>/dev/null"],
+         "find /sdcard/ -maxdepth 6 -type d -name test_results 2>/dev/null"],
         capture_output=True, text=True,
     )
 
@@ -374,7 +377,8 @@ def scan_vcat_data_folders(session_id: str, device_id: str) -> dict:
         if d and d not in seen:
             seen.add(d)
             candidates.append(d)
-    for default_root in ("/sdcard/vcat-d", "/sdcard/vcat-ai"):
+    # "vcat" is the pre-rename vcat-d folder, still in use on some devices.
+    for default_root in ("/sdcard/vcat-d", "/sdcard/vcat", "/sdcard/vcat-ai"):
         d = f"{default_root}/test_results"
         if d not in seen:
             seen.add(d)

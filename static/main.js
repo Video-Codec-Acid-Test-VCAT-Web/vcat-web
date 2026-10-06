@@ -30,6 +30,44 @@ function fetchDeviceInfo(deviceId, refresh = false) {
   }
 
 
+// Live polling ramps rather than running at one fixed interval: the first few
+// refreshes land about a second apart so a freshly connected session fills in
+// immediately, then the gap grows to the app's steady rate. Before this, the
+// first update was a whole interval away, so vcat-d sat empty for 30s after
+// Connect while its charts had nothing to draw.
+const POLL_START_MS = 1000;
+const POLL_GROWTH = 1.8;   // 1.0s, 1.8s, 3.2s, 5.8s, 10.5s, 18.9s, then the cap
+
+// Self-rescheduling poll loop. `handle` reads and writes the caller's liveness
+// handle (window.telemetryInterval / aiLivePoll), so the existing
+// `clearInterval(...)` teardowns keep working untouched — setTimeout and
+// setInterval share one timer list, so clearInterval cancels either kind.
+//
+// Each tick is awaited before the next is scheduled, so a slow refresh can no
+// longer have a second request issued on top of it the way setInterval allowed.
+function startBackoffPoll(handle, tick, maxMs) {
+  let delay = Math.min(POLL_START_MS, maxMs);
+
+  const step = () => {
+    // Torn down between scheduling and firing — don't resurrect the loop.
+    if (!handle.get()) return;
+    Promise.resolve()
+      .then(tick)
+      .catch(err => console.error("telemetry poll failed:", err))
+      .finally(() => {
+        if (!handle.get()) return;
+        delay = Math.min(delay * POLL_GROWTH, maxMs);
+        handle.set(setTimeout(step, delay));
+      });
+  };
+
+  handle.set(setTimeout(step, delay));
+}
+
+// Steady-state rates, unchanged from the fixed intervals these loops used.
+const VCATD_POLL_MAX_MS = 30000;
+const VCATAI_POLL_MAX_MS = 5000;
+
 function waitForChartAndStartPolling() {
   const canvas = document.getElementById("telemetry-cpuChart");
   const canvasReady = canvas && canvas.getContext;
@@ -37,7 +75,14 @@ function waitForChartAndStartPolling() {
   if (typeof Chart !== 'undefined' && canvasReady) {
     console.log("✅ Chart.js and canvas ready — starting polling");
     fetchAndUpdateTelemetry(); // Initial draw
-    window.telemetryInterval = setInterval(fetchAndUpdateTelemetry, 30000);
+    startBackoffPoll(
+      {
+        get: () => window.telemetryInterval,
+        set: v => { window.telemetryInterval = v; },
+      },
+      fetchAndUpdateTelemetry,
+      VCATD_POLL_MAX_MS,
+    );
     updateSnapshotButtons();
   } else {
     console.log("⏳ Waiting for Chart.js and canvas...");
@@ -59,6 +104,34 @@ function updateSnapshotButtons() {
   const live = !!(aiLivePoll || window.telemetryInterval);
   setBtnEnabled(document.getElementById("save-snapshot-btn"), live);
   refreshConnectAvailability();
+  updateDisconnectButtons();
+}
+
+// Disconnect is mirrored onto the live monitor tab, so ending a session no longer
+// means navigating back to the device panel for it. The toolbar is shared with the
+// file and comparison tabs, which have nothing to disconnect, so the button only
+// appears on a tab whose app is actually live.
+function updateDisconnectButtons() {
+  const liveByTab = {
+    telemetry: !!window.telemetryInterval,
+    [AI_LIVE_TAB]: !!aiLivePoll,
+  };
+  document.querySelectorAll(".tele-disconnect-btn").forEach(btn => {
+    const tabId = tabIdFromNode(btn);
+    const live = !!liveByTab[tabId];
+    btn.style.display = live ? "" : "none";
+    btn.title = tabId === AI_LIVE_TAB
+      ? "Disconnect vcat-ai monitoring on this device"
+      : "Disconnect vcat-d monitoring on this device";
+  });
+}
+
+// Route to whichever app owns the tab the button sits on; both go through the
+// same confirm-and-offer-snapshot prompt as the device panel's button.
+function disconnectFromBtn(btn) {
+  const tabId = tabIdFromNode(btn);
+  if (tabId === AI_LIVE_TAB) promptAiDisconnect();
+  else handleDisconnectClick();
 }
 
 // One app at a time: while one app's session is live, the OTHER app's Connect
@@ -329,9 +402,19 @@ function stopAiLive() {
 // Tear down the vcat-d live UI (poll loop + live tab + connect button).
 function stopVcatdLive() {
   if (window.telemetryInterval) { clearInterval(window.telemetryInterval); window.telemetryInterval = null; }
+
+  // Removing the pane the user is currently on leaves the vcat-d panel with no
+  // visible tab at all, which only looks fixable by reloading the page. Fall back
+  // to the device tab, the way the vcat-ai teardown already does with
+  // showAiTab("ai-device"). Only when the live tab was the active one, so an
+  // unplug while reading a file tab doesn't yank the view out from under it.
+  const liveWasActive = !!document
+    .getElementById("telemetry-tab-btn")?.classList.contains("active-tab");
+
   document.getElementById("telemetry-tab-btn")?.remove();
   document.getElementById("telemetry-tab")?.remove();
   if (chartsByTabId["telemetry"]) delete chartsByTabId["telemetry"];
+  if (liveWasActive) showTab("device");
   const btn = document.getElementById("connect-btn");
   if (btn) {
     btn.src = "/static/btn_connect_device.png";
@@ -471,7 +554,11 @@ async function handleAiConnectClick() {
 
   poll();
   if (aiLivePoll) clearInterval(aiLivePoll);
-  aiLivePoll = setInterval(poll, 5000);
+  startBackoffPoll(
+    { get: () => aiLivePoll, set: v => { aiLivePoll = v; } },
+    poll,
+    VCATAI_POLL_MAX_MS,
+  );
 
   setAiConnectState(true);
   updateAiToolbar(deviceId);
@@ -746,7 +833,8 @@ function renderFileTelemetry(tabId, app, data) {
     updateAiProcChart(telemetry, tabId);
     updateTempChart(telemetry, tabId);
   } else {
-    if (data.test_details) updateTestDetailsUI({ test_details: data.test_details }, tabId);
+    if (data.test_details) updateTestDetailsUI(
+      { test_details: data.test_details, test_conditions: data.test_conditions }, tabId);
     updateCpuChart(telemetry, tabId);
     updateBatteryChart(telemetry, tabId);
     updateFreqChart(telemetry, tabId);
@@ -1122,34 +1210,98 @@ function updateCpuChart(telemetry, tabId) {
 
 
 
-function updateFreqChart(telemetry, tabId) {
-  const freq = telemetry.cpu_freq || [];
-  if (!freq.length) return;
+// Every core the log ever reported a frequency for. Reading the core list from a
+// single sample (the last one) loses the whole series if that row happens to be
+// truncated or blank — which drops the chart and the spreadsheet sheet even though
+// thousands of good samples sit behind it. Scanning back to the newest populated
+// sample, then filling in any core seen earlier, keeps the list stable.
+function coreKeysOf(freq) {
+  const keys = [];
+  const seen = new Set();
+  for (let i = freq.length - 1; i >= 0; i--) {
+    const f = freq[i] && freq[i].frequencies;
+    if (!f) continue;
+    for (const k of Object.keys(f)) {
+      if (!seen.has(k)) { seen.add(k); keys.push(k); }
+    }
+    if (keys.length && i < freq.length - 1) break;  // one populated sample is enough
+  }
+  return keys.sort((a, b) => {
+    const na = /(\d+)$/.exec(a), nb = /(\d+)$/.exec(b);
+    return na && nb ? Number(na[1]) - Number(nb[1]) : a.localeCompare(b);
+  });
+}
 
-  const labels = freq.map(p => p.elapsed_time);
-  const stepSize = computeStepSize(labels.at(-1) || 0);
-  const coreKeys = Object.keys(freq.at(-1)?.frequencies || {});
+// Split core keys into {large, small}. The server sends an authoritative map
+// built from each core's maximum clock; when it can't (homogeneous CPU, or a log
+// header with no per-core block) we infer the split from the highest frequency
+// each core actually reached, treating the lowest-peaking group as the small
+// cluster. Either way "small" is the slowest cluster only — everything else is
+// large, so a three-cluster SoC puts its mid and prime cores in one chart.
+function splitCoreKeys(coreKeys, coreClasses, freq) {
+  // The class map is always keyed core0..coreN, but the series keys are not: the
+  // live worker emits core0.., while a log file's columns are cpu.freq0.. and so
+  // arrive as freq0... Match on the trailing index so the authoritative map is
+  // used for both, instead of silently falling through to inference on log files.
+  const classOf = k => {
+    if (!coreClasses) return undefined;
+    if (coreClasses[k]) return coreClasses[k];
+    const n = /(\d+)$/.exec(String(k));
+    return n ? coreClasses["core" + n[1]] : undefined;
+  };
 
-  const datasets = coreKeys.map((key, i) => ({
-    label: key,
-    data: freq.map(p => p.frequencies[key]),
-    borderColor: COLORS[i % COLORS.length],
-    backgroundColor: COLORS[i % COLORS.length],
-    borderWidth: 2,
-    tension: 0.1,
-    pointRadius: 0
-  }));
-
-  const canvasId = `${tabId}-freqChart`;
-  const chartCanvas = document.getElementById(canvasId);
-  if (!chartCanvas) {
-    console.warn(`⚠️ Freq chart canvas not found: ${canvasId}`);
-    return;
+  if (coreClasses && Object.keys(coreClasses).length) {
+    const large = coreKeys.filter(k => classOf(k) !== "small");
+    const small = coreKeys.filter(k => classOf(k) === "small");
+    if (small.length) return { large, small };
   }
 
+  const peak = {};
+  coreKeys.forEach(k => {
+    peak[k] = Math.max(0, ...freq.map(p => p.frequencies[k] || 0));
+  });
+  const distinct = [...new Set(Object.values(peak))].filter(v => v > 0);
+  if (distinct.length < 2) return { large: coreKeys, small: [] };
+
+  const slowest = Math.min(...distinct);
+  return {
+    large: coreKeys.filter(k => peak[k] !== slowest),
+    small: coreKeys.filter(k => peak[k] === slowest),
+  };
+}
+
+// Draw one frequency chart for a subset of cores. Colours are indexed by the
+// core's position in the full core list, so core3 keeps the same colour whether
+// it lands in the large or the small chart.
+function drawFreqChart(tabId, chartKey, canvasSuffix, keys, coreKeys, freq, labels, stepSize) {
+  const canvasId = `${tabId}-${canvasSuffix}`;
+  const canvas = document.getElementById(canvasId);
+  if (!canvas) return;
+
+  const wrapper = canvas.closest(".chart-wrapper");
+  if (!keys.length) {
+    // Nothing in this cluster (homogeneous CPU): hide rather than draw an empty axis.
+    if (wrapper) wrapper.style.display = "none";
+    return;
+  }
+  if (wrapper) wrapper.style.display = "";
+
+  const datasets = keys.map(key => {
+    const color = COLORS[coreKeys.indexOf(key) % COLORS.length];
+    return {
+      label: key,
+      data: freq.map(p => p.frequencies[key]),
+      borderColor: color,
+      backgroundColor: color,
+      borderWidth: 2,
+      tension: 0.1,
+      pointRadius: 0
+    };
+  });
+
   chartsByTabId[tabId] ||= {};
-  chartsByTabId[tabId].freqChart = updateChart(
-      chartsByTabId[tabId].freqChart,
+  chartsByTabId[tabId][chartKey] = updateChart(
+      chartsByTabId[tabId][chartKey],
       canvasId,
       datasets,
       labels,
@@ -1157,6 +1309,34 @@ function updateFreqChart(telemetry, tabId) {
       labels.at(-1),
       stepSize
   );
+}
+
+function updateFreqChart(telemetry, tabId) {
+  const freq = telemetry.cpu_freq || [];
+  if (!freq.length) return;
+
+  const labels = freq.map(p => p.elapsed_time);
+  const stepSize = computeStepSize(labels.at(-1) || 0);
+  const coreKeys = coreKeysOf(freq);
+
+  const { large, small } = splitCoreKeys(coreKeys, telemetry.core_classes, freq);
+
+  // With no small cluster to separate out, the large chart is just "the" CPU
+  // frequency chart — retitle it so it doesn't claim a split that isn't there.
+  const largeCanvas = document.getElementById(`${tabId}-freqChart`);
+  if (!largeCanvas) {
+    console.warn(`⚠️ Freq chart canvas not found: ${tabId}-freqChart`);
+    return;
+  }
+  const largeTitle = largeCanvas.closest(".chart-wrapper")?.querySelector("h3");
+  if (largeTitle) {
+    largeTitle.textContent = small.length
+      ? "CPU Frequency - Large Cores (MHz)"
+      : "CPU Frequency (MHz)";
+  }
+
+  drawFreqChart(tabId, "freqChart", "freqChart", large, coreKeys, freq, labels, stepSize);
+  drawFreqChart(tabId, "freqChartSmall", "freqChartSmall", small, coreKeys, freq, labels, stepSize);
 }
 
 
@@ -1226,11 +1406,37 @@ function updateFrameDropChart(telemetry, tabId) {
     return;
   }
 
+  // Orange for ordinary drops, red for the keyframe resyncs, which are the worse
+  // event. Both taken from the shared palette so they match the other charts.
+  const DROP_ORANGE = COLORS[4];
+  const KEYFRAME_RED = COLORS[0];
+
+  const datasets = [{
+    label: 'Frame Drops',
+    data: values,
+    borderColor: DROP_ORANGE,
+    backgroundColor: DROP_ORANGE,
+    borderWidth: 2,
+  }];
+
+  // Logged from header 3004 on. A log that predates it reports null throughout,
+  // and gets one line as before rather than a flat zero implying none occurred.
+  if (drops.some(p => typeof p.dropped_to_keyframe === "number")) {
+    datasets.push({
+      label: 'Dropped to Keyframe',
+      data: drops.map(p =>
+        typeof p.dropped_to_keyframe === "number" ? p.dropped_to_keyframe : null),
+      borderColor: KEYFRAME_RED,
+      backgroundColor: KEYFRAME_RED,
+      borderWidth: 2,
+    });
+  }
+
   chartsByTabId[tabId] ||= {};
   chartsByTabId[tabId].frameDropChart = updateChart(
       chartsByTabId[tabId].frameDropChart,
       canvasId,
-      [{ label: 'Frame Drops', data: values, borderWidth: 2 }],
+      datasets,
       labels,
       'Dropped Frames',
       labels.at(-1),
@@ -1260,7 +1466,8 @@ async function fetchAndUpdateTelemetry() {
     )).json();
     if (result.disconnected) { onDeviceDisconnected("vcat_d", selectedDevice); return; }
     workerTel = result.telemetry_data || null;
-    if (result.test_details) updateTestDetailsUI({ test_details: result.test_details }, tabId);
+    if (result.test_details) updateTestDetailsUI(
+      { test_details: result.test_details, test_conditions: result.test_conditions }, tabId);
   } catch (err) {
     console.error('❌ Telemetry fetch failed:', err);
   }
@@ -1509,6 +1716,17 @@ function updateTestDetailsUI(data, tabId) {
   tabRoot.querySelector(".test-state").value = details.testState || "";
   tabRoot.querySelector(".test-start-time").value = details.startTime || "";
   tabRoot.querySelector(".test-playlist").value = playlistFileName;
+
+  // audioClock arrived with header 3004. Older logs report null rather than false,
+  // so the row is hidden instead of claiming the run had it off.
+  const clock = (data.test_conditions || {}).audioClock;
+  const clockRow = tabRoot.querySelector(".test-audio-clock-row");
+  const clockField = tabRoot.querySelector(".test-audio-clock");
+  if (clockRow && clockField) {
+    const reported = clock === true || clock === false;
+    clockRow.style.display = reported ? "flex" : "none";
+    clockField.value = clock === true ? "Yes" : clock === false ? "No" : "";
+  }
 
   if (curVideo) {
     curVideoFileName = getFileName(curVideo.fileName || "");
@@ -2549,6 +2767,7 @@ function exportFromBtn(btn, kind) {
   const tabId = tabIdFromNode(btn);
   if (!tabId) return;
   if (kind === "pdf") exportTabPdf(tabId);
+  else if (kind === "html") exportTabHtml(tabId);
   else exportTabSpreadsheet(tabId);
 }
 
@@ -2797,12 +3016,57 @@ function removeCompareTab(tabId) {
 function compareColumnHead(src, side) {
   const head = document.createElement("div");
   head.className = "cmp-col-head";
+
+  // The file name sits on its own line so the device block below it can ellipsise
+  // per row rather than sharing one nowrap line with the name.
+  const name = document.createElement("div");
+  name.className = "cmp-col-name";
   const tag = document.createElement("span");
   tag.className = "cmp-col-tag";
   tag.textContent = side;
-  head.append(tag, document.createTextNode(` ${src.label}`));
+  name.append(tag, document.createTextNode(` ${src.label}`));
+
+  // Filled once the payload lands — the header bar is built before the logs are
+  // read, so which device a column came from isn't known yet.
+  const device = document.createElement("div");
+  device.className = "cmp-col-device";
+
+  head.append(name, device);
   head.title = `${src.label} (${src.kind === "device" ? "on device" : "local file"})`;
   return head;
+}
+
+// Which device a comparison column came from. Guessing it from the file name was
+// the only option before, so this is spelled out in the pinned header instead.
+function compareDeviceRows(info) {
+  const shown = v => (v && String(v).trim()) || "—";
+  const device = [info.manufacturer, info.model].filter(Boolean).join(" ");
+  const android = String(info.android_version || "").trim();
+  return [
+    ["Device", shown(device)],
+    ["SoC", shown(info.soc || info.soc_model)],
+    // Logs record this as "14 (32-bit)" or just "15"; prefix only the bare number.
+    ["Android", android ? (/^android/i.test(android) ? android : `Android ${android}`) : "—"],
+  ];
+}
+
+function fillCompareDeviceHead(head, payload) {
+  const box = head && head.querySelector(".cmp-col-device");
+  if (!box) return;
+  box.textContent = "";
+  compareDeviceRows((payload && payload.run_info) || {}).forEach(([label, value]) => {
+    const row = document.createElement("div");
+    row.className = "cmp-dev-row";
+    const l = document.createElement("span");
+    l.className = "cmp-dev-label";
+    l.textContent = label;
+    const v = document.createElement("span");
+    v.className = "cmp-dev-value";
+    v.textContent = value;
+    v.title = value;
+    row.append(l, v);
+    box.appendChild(row);
+  });
 }
 
 function compareToolbar(tabId, sources) {
@@ -2833,6 +3097,17 @@ function compareToolbar(tabId, sources) {
   xls.disabled = true;  // enabled once every column has rendered
   xls.onclick = () => exportTabSpreadsheet(tabId);
   right.appendChild(xls);
+
+  const htm = document.createElement("button");
+  htm.type = "button";
+  htm.className = "cmp-pdf-btn cmp-html-btn";
+  htm.dataset.export = "html";
+  htm.textContent = "⤓ Save HTML";
+  htm.title = "Save this comparison as a standalone interactive HTML file " +
+              "(no server or network needed to open it)";
+  htm.disabled = true;  // enabled once every column has rendered
+  htm.onclick = () => exportTabHtml(tabId);
+  right.appendChild(htm);
 
   const align = document.createElement("label");
   align.className = "cmp-align";
@@ -2895,6 +3170,7 @@ function interleaveCompareGrid(grid, sideIds) {
     const holder = document.getElementById(`${sideId}-tab`);
     return holder
       ? [...holder.querySelectorAll(":scope > .dashboard-grid > .chart-wrapper")]
+          .filter(w => w.style.display !== "none")
       : [];
   };
   const perSide = sideIds.map(wrappersOf);
@@ -3081,6 +3357,7 @@ async function openCompareTab(sources, cached = []) {
   }
 
   compareStateByTabId[tabId].data = loaded;
+  [...heads.children].forEach((head, i) => fillCompareDeviceHead(head, loaded[i]));
   sides.forEach((sideId, i) => renderFileTelemetry(sideId, app, loaded[i]));
   interleaveCompareGrid(grid, sides);
   staging.remove();
@@ -3090,6 +3367,316 @@ async function openCompareTab(sources, cached = []) {
 
   updateExportButtons(tabId);
   return tabId;
+}
+
+
+// ---- Standalone HTML export ---------------------------------------------------
+// A self-contained file: stylesheet, Chart.js and the series are all inlined, so
+// it opens from disk with no server and no network and still behaves like the
+// comparison panel — real canvases with hover, legend toggling and zoom, not a
+// picture of them. Works for a single log as well as a comparison; the layout is
+// the same one row per metric, one column per log.
+
+// Points kept per series. Far more than any screen can resolve, and ~0.8 MB of
+// JSON per log against ~14 MB for every raw sample.
+const HTML_EXPORT_POINTS = 1500;
+
+// Pick which sample indices survive. Every series on a chart shares one x axis,
+// so one index set is chosen for all of them: per bucket, keep where the summed
+// (normalised) series is at its highest and lowest. That holds on to spikes and
+// troughs, which plain every-nth striding would walk straight past.
+function decimateIndices(datasets, length, target) {
+  if (length <= target) return null;           // null = keep everything
+
+  const ranges = datasets.map(ds => {
+    const nums = ds.data.filter(v => typeof v === "number");
+    const lo = nums.length ? Math.min(...nums) : 0;
+    const hi = nums.length ? Math.max(...nums) : 1;
+    return { lo, span: hi - lo || 1 };
+  });
+  const signal = i => datasets.reduce((acc, ds, d) => {
+    const v = ds.data[i];
+    return acc + (typeof v === "number" ? (v - ranges[d].lo) / ranges[d].span : 0);
+  }, 0);
+
+  const buckets = Math.max(1, Math.floor(target / 2));
+  const size = length / buckets;
+  const keep = new Set([0, length - 1]);
+  for (let b = 0; b < buckets; b++) {
+    const from = Math.floor(b * size);
+    const to = Math.min(length, Math.floor((b + 1) * size));
+    if (to <= from) continue;
+    let minI = from, maxI = from, minV = Infinity, maxV = -Infinity;
+    for (let i = from; i < to; i++) {
+      const v = signal(i);
+      if (v < minV) { minV = v; minI = i; }
+      if (v > maxV) { maxV = v; maxI = i; }
+    }
+    keep.add(minI);
+    keep.add(maxI);
+  }
+  return [...keep].sort((a, b) => a - b);
+}
+
+// Lift a live Chart instance into plain JSON — whatever is on screen is what gets
+// written, so the export can't drift from the panel as the charts change.
+function serializeChart(chart) {
+  if (!chart || !chart.data) return null;
+  const datasets = chart.data.datasets || [];
+  const labels = chart.data.labels || [];
+  const idx = decimateIndices(datasets, labels.length, HTML_EXPORT_POINTS);
+  const pick = arr => (idx ? idx.map(i => arr[i]) : arr.slice());
+
+  // Axis settings come off the live chart too, so the export inherits the same
+  // tick spacing and 0-100 clamping. The tick/tooltip *callbacks* can't survive
+  // JSON, so only their inputs travel and the export reinstates the functions.
+  const x = chart.options?.scales?.x || {};
+  const y = chart.options?.scales?.y || {};
+
+  return {
+    labels: pick(labels),
+    kept: idx ? idx.length : labels.length,
+    total: labels.length,
+    datasets: datasets.map(ds => ({
+      label: ds.label,
+      data: pick(ds.data || []),
+      borderColor: ds.borderColor,
+      backgroundColor: ds.backgroundColor,
+      borderWidth: ds.borderWidth ?? 2,
+      tension: ds.tension ?? 0.1,
+      pointRadius: ds.pointRadius ?? 0,
+    })),
+    yTitle: y.title?.text || "",
+    xTitle: x.title?.text || "",
+    xMin: x.min ?? 0,
+    xSuggestedMax: x.suggestedMax ?? null,
+    xStepSize: x.ticks?.stepSize ?? null,
+    yMax: y.max ?? null,
+    yBeginAtZero: y.beginAtZero !== false,
+  };
+}
+
+function htmlEscape(v) {
+  return String(v ?? "").replace(/[&<>"']/g, c => (
+    { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]
+  ));
+}
+
+// </script> inside embedded JSON would end the script element early.
+function jsonForScript(value) {
+  return JSON.stringify(value).replace(/<\//g, "<\\/");
+}
+
+async function fetchText(url) {
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`${url} -> HTTP ${res.status}`);
+  return res.text();
+}
+
+async function exportTabHtml(tabId) {
+  const ctx = exportContextFor(tabId);
+  if (!ctx || ctx.data.some(d => !d)) return;
+  const { sources, sides, data, comparison } = ctx;
+
+  // Same title-per-chart-key mapping the PDF uses, so both exports agree on
+  // which metric a row is and in what order the rows run.
+  const titleByKey = {};
+  paneOf(tabId)?.querySelectorAll(".chart-wrapper").forEach(w => {
+    const h3 = w.querySelector("h3");
+    const canvas = w.querySelector("canvas");
+    if (!h3 || !canvas) return;
+    const key = canvas.id.replace(/^.*-/, "");
+    if (!titleByKey[key]) titleByKey[key] = h3.textContent.trim();
+  });
+
+  const keys = [];
+  sides.forEach(sd => Object.keys(chartsByTabId[sd] || {}).forEach(k => {
+    if (!keys.includes(k)) keys.push(k);
+  }));
+  if (!keys.length) return alert("Nothing to export — no charts have rendered yet.");
+
+  const labels = comparisonSeriesLabels(data);
+  const columns = sources.map((src, i) => ({
+    tag: sideTag(i),
+    label: src.label,
+    series: labels[i],
+    device: compareDeviceRows((data[i] && data[i].run_info) || {}),
+  }));
+
+  const rows = keys.map(key => ({
+    title: titleByKey[key] || key,
+    charts: sides.map(sd => serializeChart((chartsByTabId[sd] || {})[key])),
+  }));
+
+  let css, chartLib;
+  try {
+    [css, chartLib] = await Promise.all([
+      fetchText("/static/style.css"),
+      fetchText("/static/vendor/chart.umd.min.js"),
+    ]);
+  } catch (err) {
+    return alert(`Could not read the files the export inlines:\n\n${err.message}`);
+  }
+
+  const kept = rows.reduce((a, r) => a + r.charts.reduce((b, c) => b + (c ? c.kept : 0), 0), 0);
+  const total = rows.reduce((a, r) => a + r.charts.reduce((b, c) => b + (c ? c.total : 0), 0), 0);
+  const title = comparison
+    ? `VCAT comparison — ${sources.map(s => s.label).join(" vs ")}`
+    : `VCAT results — ${sources[0].label}`;
+
+  const html = buildExportHtml({ title, columns, rows, css, chartLib, kept, total });
+  const stem = (comparison ? "compare_" : "report_") + exportStem(data);
+  downloadBlob(new Blob([html], { type: "text/html;charset=utf-8" }), `${stem}.html`);
+}
+
+// Assemble the document. The panel's own stylesheet is inlined and reused, so the
+// export inherits the real look rather than a hand-rolled imitation; a short
+// override block replaces the parts that assume the live app shell.
+function buildExportHtml({ title, columns, rows, css, chartLib, kept, total }) {
+  const cols = columns.length;
+  const headCells = columns.map(c => `
+      <div class="cmp-col-head">
+        <div class="cmp-col-name"><span class="cmp-col-tag">${htmlEscape(c.tag)}</span> ${htmlEscape(c.label)}</div>
+        <div class="cmp-col-device">
+          ${c.device.map(([k, v]) => `<div class="cmp-dev-row"><span class="cmp-dev-label">${htmlEscape(k)}</span><span class="cmp-dev-value">${htmlEscape(v)}</span></div>`).join("")}
+          <div class="cmp-dev-row"><span class="cmp-dev-label">Run</span><span class="cmp-dev-value">${htmlEscape(c.series)}</span></div>
+        </div>
+      </div>`).join("");
+
+  const cells = [];
+  rows.forEach((row, r) => row.charts.forEach((chart, c) => {
+    cells.push(chart
+      ? `<div class="chart-wrapper"><h3>${htmlEscape(row.title)}</h3><canvas id="ch-${r}-${c}"></canvas></div>`
+      : `<div class="chart-wrapper cmp-empty">${htmlEscape(row.title)} — not recorded in this log</div>`);
+  }));
+
+  const payload = rows.map(row => row.charts);
+  const pct = total ? Math.round((kept / total) * 100) : 100;
+
+  return `<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>${htmlEscape(title)}</title>
+<style>${css}</style>
+<style>
+  /* The app shell is gone, so the scroller sizes to the viewport instead of
+     being measured by sizeCompareAreas(). */
+  body { margin: 0; background: #111; color: #eee;
+         font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+  .export-head { padding: 14px 18px 8px; border-bottom: 1px solid #444; }
+  .export-head h1 { margin: 0 0 4px; font-size: 17px; }
+  .export-head .sub { color: #888; font-size: 12px; }
+  .compare-scroll { height: auto; overflow: visible; padding-bottom: 30px; }
+  .compare-heads { grid-template-columns: repeat(${cols}, minmax(420px, 1fr)); }
+  .compare-grid { display: grid; gap: 10px; padding: 10px;
+                  grid-template-columns: repeat(${cols}, minmax(420px, 1fr)); }
+  .chart-wrapper { background: #1b1b1b; border-radius: 8px; padding: 10px; }
+  .chart-wrapper h3 { margin: 0 0 8px; font-size: 14px; color: #ddd; }
+  .chart-wrapper canvas { width: 100% !important; height: 260px !important; }
+  .cmp-empty { display: flex; align-items: center; justify-content: center;
+               min-height: 120px; }
+</style>
+</head><body>
+<div class="export-head">
+  <h1>${htmlEscape(title)}</h1>
+  <div class="sub">Exported ${htmlEscape(new Date().toLocaleString())} —
+    ${pct}% of samples retained (${kept.toLocaleString()} of ${total.toLocaleString()} points).
+    Hover for exact values; click a legend entry to hide a series.</div>
+</div>
+<div class="compare-scroll">
+  <div class="compare-heads">${headCells}</div>
+  <div class="compare-grid">${cells.join("")}</div>
+</div>
+<script>${chartLib}</script>
+<script>
+const ROWS = ${jsonForScript(payload)};
+
+// Same formatters the panel uses, restated here because a tick callback is a
+// function and can't be carried across in JSON.
+function fmtClock(seconds) {
+  const n = Number(seconds);
+  if (!Number.isFinite(n)) return "";
+  const totalMs = Math.round(Math.abs(n) * 1000);
+  const h = Math.floor(totalMs / 3600000);
+  const m = Math.floor((totalMs % 3600000) / 60000);
+  const sec = Math.floor((totalMs % 60000) / 1000);
+  const ms = totalMs % 1000;
+  const pad = (v, w) => String(v).padStart(w, "0");
+  return (n < 0 ? "-" : "") + h + ":" + pad(m, 2) + ":" + pad(sec, 2) + "." + pad(ms, 3);
+}
+function fmtRaw(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return String(value);
+  if (Number.isInteger(n)) return String(n);
+  return n.toFixed(3).replace(/0+$/, "").replace(/\.$/, "");
+}
+
+ROWS.forEach((row, r) => row.forEach((spec, c) => {
+  if (!spec) return;
+  const el = document.getElementById("ch-" + r + "-" + c);
+  if (!el) return;
+  new Chart(el, {
+    type: "line",
+    data: { labels: spec.labels, datasets: spec.datasets },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      elements: { point: { radius: 0 } },
+      interaction: { mode: "index", intersect: false },
+      plugins: {
+        legend: { position: "bottom", labels: { color: "#ddd", boxWidth: 12, padding: 10 } },
+        tooltip: { callbacks: { title: items => {
+          if (!items || !items.length) return "";
+          const it = items[0];
+          const x = (it.parsed && typeof it.parsed.x === "number") ? it.parsed.x : Number(it.label);
+          if (!Number.isFinite(x)) return it.label == null ? "" : it.label;
+          return fmtRaw(x) + " (" + fmtClock(x) + ")";
+        } } },
+        zoom: false,
+      },
+      scales: {
+        x: {
+          type: "linear",
+          min: spec.xMin,
+          suggestedMax: spec.xSuggestedMax == null ? undefined : spec.xSuggestedMax,
+          title: { display: !!spec.xTitle, text: spec.xTitle, color: "#aaa" },
+          grid: { color: "#333" },
+          ticks: {
+            color: "#aaa",
+            stepSize: spec.xStepSize == null ? undefined : spec.xStepSize,
+            // Elapsed seconds as hh:mm, matching the panel's axis.
+            callback: v => {
+              const h = Math.floor(v / 3600);
+              const m = Math.floor((v % 3600) / 60);
+              return String(h).padStart(2, "0") + ":" + String(m).padStart(2, "0");
+            },
+          },
+        },
+        y: {
+          beginAtZero: spec.yBeginAtZero,
+          max: spec.yMax == null ? undefined : spec.yMax,
+          title: { display: !!spec.yTitle, text: spec.yTitle, color: "#aaa" },
+          grid: { color: "#333" },
+          ticks: { color: "#aaa", precision: 0 },
+        },
+      },
+    },
+  });
+}));
+<\/script>
+</body></html>`;
+}
+
+function downloadBlob(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  // Revoked on a later turn of the loop; revoking immediately can cancel the
+  // download in some browsers.
+  setTimeout(() => URL.revokeObjectURL(url), 10000);
 }
 
 // ---- Save a comparison as a PDF ----------------------------------------------
@@ -3270,7 +3857,10 @@ function exportTabPdf(tabId) {
     const h3 = w.querySelector("h3");
     const canvas = w.querySelector("canvas");
     if (!h3 || !canvas) return;
-    const key = canvas.id.replace(/^.*?-(?=[a-z]+Chart$)/, "");
+    // Canvas ids are `${tabId}-${chartKey}` and chart keys never contain a
+    // hyphen, so strip through the last one. (A stricter lookahead here used to
+    // drop the whole id for any key with a capital in it, e.g. frameDropChart.)
+    const key = canvas.id.replace(/^.*-/, "");
     if (!titleByKey[key]) titleByKey[key] = h3.textContent.trim();
   });
 
@@ -3398,9 +3988,42 @@ function buildHourlyTable(seriesList, valueKey = "level") {
   return rows;
 }
 
-// The codec is what distinguishes two runs — a log filename says nothing useful in
-// a chart legend. Falls back through decoder / resolution / file only if both sides
-// would otherwise carry the same label.
+// Counts, not levels: a frame-drop row says how many frames went missing in that
+// sample, so an hour's figure is everything logged within it added up. The other
+// sheets take the reading nearest the hour mark, which for a count would report
+// one arbitrary second and call it the hour. Hours past the end of a log stay
+// blank rather than 0, so a short run reads as "no data" and not "no drops".
+function buildHourlySumTable(seriesList, valueKey) {
+  const spans = seriesList.map(s => (s.length ? s[s.length - 1].elapsed_time : 0));
+  const lastHour = Math.ceil(Math.max(0, ...spans) / HOUR_S);
+  const rows = [];
+
+  for (let h = 0; h <= lastHour; h++) {
+    const from = h * HOUR_S;
+    const to = from + HOUR_S;
+    rows.push([h, ...seriesList.map((s, i) => {
+      if (!s.length || from > spans[i]) return null;
+      let sum = 0, seen = false;
+      for (const p of s) {
+        if (p.elapsed_time < from) continue;
+        if (p.elapsed_time >= to) break;      // series is ordered by time
+        if (typeof p[valueKey] === "number") { sum += p[valueKey]; seen = true; }
+      }
+      return seen ? sum : null;
+    })]);
+  }
+
+  while (rows.length > 1 && rows[rows.length - 1].slice(1).every(v => v === null)) {
+    rows.pop();
+  }
+  return rows;
+}
+
+// The decoder name is what distinguishes two runs — "vcat-dav1d-1.5.1" identifies
+// the build that was measured, where the codec family ("AV1") is shared by every
+// AV1 decoder and a log filename says nothing useful in a chart legend. Falls back
+// to the codec family, then resolution / framerate / file, only if two runs would
+// otherwise carry the same label.
 function codecLabel(codec) {
   return String(codec || "").replace(/^video\//i, "").toUpperCase();
 }
@@ -3409,16 +4032,18 @@ function comparisonSeriesLabels(payloads) {
   const parts = payloads.map(d => {
     const v = ((d && d.test_details) || {}).currentTestVideo || {};
     return {
+      decoder: String(v.videoDecoder || "").trim(),
       codec: codecLabel(v.videoCodec),
-      decoder: v.videoDecoder || "",
       resolution: v.resolution || "",
       framerate: Number(v.framerate) > 0 ? `${Number(v.framerate).toFixed(2)} fps` : "",
       file: String(v.fileName || "").replace(/\.[^.]+$/, ""),
     };
   });
-  const labels = parts.map(p => p.codec || "unknown");
+  // vcat-ai logs (and older vcat-d ones) record no decoder name; those keep the
+  // codec family rather than collapsing to "unknown".
+  const labels = parts.map(p => p.decoder || p.codec || "unknown");
 
-  // Two runs of the same codec would give identical columns; separate each clashing
+  // Two runs of the same decoder would give identical columns; separate each clashing
   // group by the first field that actually tells its members apart.
   const groups = new Map();
   labels.forEach((l, i) => {
@@ -3427,7 +4052,7 @@ function comparisonSeriesLabels(payloads) {
   });
   groups.forEach((idxs, label) => {
     if (idxs.length < 2) return;
-    const key = ["decoder", "framerate", "resolution", "file"].find(
+    const key = ["codec", "framerate", "resolution", "file"].find(
       k => new Set(idxs.map(i => parts[i][k])).size === idxs.length);
     idxs.forEach(i => {
       labels[i] = key
@@ -3438,6 +4063,29 @@ function comparisonSeriesLabels(payloads) {
   return labels;
 }
 
+// Collapse a log's per-core frequency samples into a single series for one
+// cluster, so it fits the workbook's one-column-per-log layout. The value is the
+// mean across that cluster's cores at each sample; cores are classified with the
+// same rule the charts use, per log, since two logs may come from different SoCs.
+function clusterFreqSeries(td, cluster) {
+  const freq = (td && td.cpu_freq) || [];
+  if (!freq.length) return [];
+  const coreKeys = coreKeysOf(freq);
+  const split = splitCoreKeys(coreKeys, td.core_classes, freq);
+  const keys = cluster === "small" ? split.small : split.large;
+  if (!keys.length) return [];
+
+  return freq.map(p => {
+    const vals = keys
+      .map(k => p.frequencies[k])
+      .filter(v => typeof v === "number");
+    return {
+      elapsed_time: p.elapsed_time,
+      value: vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : null,
+    };
+  });
+}
+
 async function exportTabSpreadsheet(tabId) {
   const ctx = exportContextFor(tabId);
   if (!ctx || ctx.data.some(d => !d)) return;
@@ -3446,23 +4094,49 @@ async function exportTabSpreadsheet(tabId) {
   const seriesFor = (key) =>
     data.map(d => ((d.telemetry_data && d.telemetry_data[key]) || []));
 
-  // One sheet per metric, each a chartable per-hour table. A metric no log recorded
-  // is skipped rather than written as an empty sheet.
-  const metrics = [
-    { metric: "Battery Level", unit: "Battery Level (%)", key: "battery", value: "level" },
-    { metric: "Temperature", unit: "Battery Temp (°C)", key: "battery_temp", value: "temp" },
+  // Each entry is one table + chart. Entries sharing a `sheet` stack onto the same
+  // worksheet in this order, so System Health reads battery temperature first and
+  // system thermal status below it. A metric no log recorded is skipped rather
+  // than written as an empty table, and a sheet left with no blocks is dropped.
+  const blockDefs = [
+    { sheet: "Battery Level", metric: "Battery Level", unit: "Battery Level (%)",
+      value: "level", series: () => seriesFor("battery") },
+    { sheet: "System Health", metric: "Battery Temperature", unit: "Battery Temp (°C)",
+      value: "temp", series: () => seriesFor("battery_temp") },
+    { sheet: "System Health", metric: "System Thermal Status", unit: "Thermal status (0-5)",
+      value: "status", series: () => seriesFor("system_thermal") },
+    { sheet: "CPU Frequency - Large Cores", metric: "CPU Frequency - Large Cores",
+      unit: "Mean Large-Core Frequency (MHz)", value: "value",
+      series: () => data.map(d => clusterFreqSeries(d.telemetry_data, "large")) },
+    { sheet: "CPU Frequency - Small Cores", metric: "CPU Frequency - Small Cores",
+      unit: "Mean Small-Core Frequency (MHz)", value: "value",
+      series: () => data.map(d => clusterFreqSeries(d.telemetry_data, "small")) },
+    { sheet: "Frame Drops", metric: "Frame Drops", unit: "Dropped frames per hour",
+      value: "delta_framedrops", sum: true, series: () => seriesFor("frame_drops") },
+    { sheet: "Frame Drops", metric: "Dropped to Keyframe", unit: "Keyframe resyncs per hour",
+      value: "dropped_to_keyframe", sum: true, series: () => seriesFor("frame_drops") },
   ];
-  const sheets = metrics
-    .map(m => ({ ...m, series: seriesFor(m.key) }))
-    .filter(m => m.series.some(sr => sr.length))
-    .map(m => ({
-      metric: m.metric,
-      unit: m.unit,
-      rows: buildHourlyTable(m.series, m.value),
-    }));
+
+  const sheets = [];
+  blockDefs
+    .map(b => ({ ...b, series: b.series() }))
+    .filter(b => b.series.some(sr => sr.length))
+    .forEach(b => {
+      const rows = b.sum
+        ? buildHourlySumTable(b.series, b.value)
+        : buildHourlyTable(b.series, b.value);
+      // A column the logs carry but never populate — dropped_to_keyframe on a
+      // pre-3004 run — would otherwise become a sheet of blank cells.
+      if (!rows.some(r => r.slice(1).some(v => v !== null))) return;
+
+      const block = { metric: b.metric, unit: b.unit, rows };
+      const last = sheets[sheets.length - 1];
+      if (last && last.sheet === b.sheet) last.blocks.push(block);
+      else sheets.push({ sheet: b.sheet, blocks: [block] });
+    });
 
   if (!sheets.length) {
-    return alert("No battery or temperature data in these logs to tabulate.");
+    return alert("No battery, temperature, CPU frequency or frame-drop data in these logs to tabulate.");
   }
 
   const labels = comparisonSeriesLabels(data);
@@ -3480,16 +4154,37 @@ async function exportTabSpreadsheet(tabId) {
           sheets,
           info_rows: infoRows,
           name: stem,
+          // Resolved and read server-side; the browser only names the files.
+          raw_sources: sources.map(src => ({
+            kind: src.kind,
+            path: src.path,
+            label: src.label,
+            device: document.getElementById("device")?.value || "",
+          })),
           notes: [
-            `One sheet per metric (${sheets.map(sh => sh.metric).join(", ")}), ` +
+            `Sheets: ${sheets.map(sh => sh.sheet).join(", ")} — ` +
               "sampled at each whole hour of elapsed test time.",
             "For every hour the reading nearest that hour mark is used " +
               `(no further away than ${HOUR_S / 2 / 60} minutes; blank if the log has no sample that close).`,
             "Hours run to the hour in which the longest-running test stopped, so its " +
               "final reading is included; a shorter run simply ends early (blank cells).",
             "Each column is one log; the block above each table identifies them.",
-            "Temperature is the battery temperature in °C — an instantaneous reading at " +
-              "the hour mark, not an average over the hour.",
+            "The sheets after the charts hold each source log verbatim — JSON header " +
+              "in column A, then the telemetry table — since the tables above resample " +
+              "to the hour and lose the underlying samples.",
+            "System Health stacks two tables: battery temperature in °C, then the " +
+              "system thermal status below it. Both are instantaneous readings at the " +
+              "hour mark, not averages over the hour.",
+            "System thermal status is Android's 0-5 throttling severity (0 = none, " +
+              "5 = shutdown), reported as logged rather than rescaled.",
+            "Frame Drops is the only sheet that totals rather than samples: each hour " +
+              "is the sum of every drop logged within it, since a drop count is an " +
+              "event tally, not a level you can read off at a moment. Dropped to " +
+              "Keyframe counts the subset severe enough to force a resync, and is " +
+              "omitted entirely for logs predating header 3004, which never recorded it.",
+            "CPU frequency is the mean clock across that cluster's cores in the sample " +
+              "nearest the hour mark — also instantaneous, not an average over the hour. " +
+              "Small cores are the lowest-clocked cluster; every other core counts as large.",
           ],
         }),
       }
