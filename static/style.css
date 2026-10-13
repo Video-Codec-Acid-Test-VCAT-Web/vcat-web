@@ -195,6 +195,23 @@ body {
   box-shadow: 0 0 8px rgba(0,0,0,0.4);
   height: 350px;
   width: 100%; /* ⬅️ ensure full width */
+  /* A column so the canvas takes the space left over by the heading and the
+     f_rms caption, instead of sizing itself from the column width and pushing
+     the caption outside the card. */
+  display: flex;
+  flex-direction: column;
+  box-sizing: border-box;
+}
+
+/* min-height:0 lets a flex child shrink below its content size; without it the
+   canvas refuses to give the caption any room. */
+.chart-wrapper > canvas {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.chart-wrapper > h3 {
+  flex: 0 0 auto;
 }
 
 .console-float {
@@ -947,4 +964,17 @@ html, body {
 .cmp-pdf-btn:disabled {
   opacity: 0.45;
   cursor: not-allowed;
+}
+
+/* f_rms under the CPU frequency charts — the empty strip below the canvas. */
+.chart-footnote {
+  flex: 0 0 auto;
+  margin-top: 4px;
+  text-align: center;
+  color: #0a7;
+  font-family: monospace;
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }

@@ -329,12 +329,41 @@ async function handleLoadFile(input) {
       body: fd,
     });
     const data = await res.json();
-    if (data.status === "ok") loadSavedSession(data.name, data.app);
-    else alert(`Load failed: ${data.message || "error"}`);
+    if (data.status !== "ok") return alert(`Load failed: ${data.message || "error"}`);
+
+    // An exported spreadsheet carries its source logs verbatim; the server unpacks
+    // them, so one workbook reopens as the session (or comparison) it came from.
+    if (data.kind === "workbook") return openUnpackedWorkbook(data.logs || []);
+
+    loadSavedSession(data.name, data.app);
   } catch (err) {
     console.error("Load failed:", err);
     alert("Load failed.");
   }
+}
+
+// Open the logs the server pulled out of a workbook: a single log as a normal
+// session tab, several as the comparison they were exported from. Mixing apps in
+// one workbook isn't something the comparison view supports, so that falls back
+// to opening the first log rather than failing.
+function openUnpackedWorkbook(logs) {
+  if (!logs.length) return alert("That spreadsheet had no log sheets to open.");
+
+  if (logs.length === 1) return loadSavedSession(logs[0].name, logs[0].app);
+
+  const app = logs[0].app;
+  if (logs.some(l => l.app !== app)) {
+    alert(`That workbook mixes vcat-d and vcat-ai logs, which can't be compared ` +
+          `side by side. Opening "${logs[0].label}" on its own.`);
+    return loadSavedSession(logs[0].name, logs[0].app);
+  }
+
+  ensureAppTab(app);
+  showAppTab(app);
+  showNoDeviceUI(false);
+  return openCompareTab(logs.map(l => ({
+    app, kind: "saved", path: l.name, label: l.label || l.name,
+  })));
 }
 
 // Add an app-rail tab if it's missing (so Load works with no device connected).
@@ -1270,9 +1299,74 @@ function splitCoreKeys(coreKeys, coreClasses, freq) {
   };
 }
 
+// Legend label for a frequency series. The underlying key is whatever the source
+// called the column — a log's cpu.freq0 arrives as "freq0", the live ADB worker
+// emits "core0" — and neither is what you want to read on a chart. Labelling by
+// core index also matches the CPU usage chart, which already says cpu0..cpuN.
+function coreLabelFor(key) {
+  const n = /(\d+)$/.exec(String(key));
+  return n ? `cpu${n[1]}` : String(key);
+}
+
 // Draw one frequency chart for a subset of cores. Colours are indexed by the
 // core's position in the full core list, so core3 keeps the same colour whether
 // it lands in the large or the small chart.
+// Time-weighted RMS of this cluster's clocks, for the caption under the chart.
+// Weighted because samples aren't evenly spaced: a reading that stood for two
+// minutes should count for more than one that stood for two seconds. Squaring
+// before averaging is the point — half an hour at 2500 MHz and half at 500 is not
+// a 1500 MHz cluster.
+function clusterFrequencyRms(freq, keys) {
+  if (!freq.length || !keys.length) return null;
+
+  const times = freq.map(p => p.elapsed_time);
+  const n = times.length;
+  if (n < 2) return null;
+
+  const weights = times.map((t, i) =>
+    i === 0 ? times[1] - times[0]
+    : i === n - 1 ? times[n - 1] - times[n - 2]
+    : (times[i + 1] - times[i - 1]) / 2);
+
+  const perCore = [];
+  for (const key of keys) {
+    let num = 0, den = 0;
+    freq.forEach((p, i) => {
+      const v = p.frequencies[key];
+      const w = Math.max(0, weights[i]);
+      if (typeof v === "number" && w > 0) { num += w * v * v; den += w; }
+    });
+    if (den > 0) perCore.push({ label: coreLabelFor(key), value: Math.sqrt(num / den) });
+  }
+  if (!perCore.length) return null;
+
+  // Square, average, square-root again — the cluster figure is the RMS of the
+  // per-core RMS values, never their arithmetic mean.
+  return {
+    perCore,
+    total: Math.sqrt(
+      perCore.reduce((a, c) => a + c.value * c.value, 0) / perCore.length),
+  };
+}
+
+// The f_rms caption in the strip under a chart. One line, cluster total first and
+// the per-core figures in brackets behind it: space is tight in a comparison
+// column, and the chart's own legend already says which core is which, so the
+// bracketed values need no labels of their own. They are in core order.
+function setFreqFootnote(canvas, rms) {
+  const wrapper = canvas && canvas.closest(".chart-wrapper");
+  if (!wrapper) return;
+  let el = wrapper.querySelector(".chart-footnote");
+  if (!rms) { if (el) el.remove(); return; }
+  if (!el) {
+    el = document.createElement("div");
+    el.className = "chart-footnote";
+    wrapper.appendChild(el);
+  }
+  const cores = rms.perCore.map(c => Math.round(c.value)).join(", ");
+  el.textContent = `f_rms ${Math.round(rms.total)} (${cores})`;
+}
+
 function drawFreqChart(tabId, chartKey, canvasSuffix, keys, coreKeys, freq, labels, stepSize) {
   const canvasId = `${tabId}-${canvasSuffix}`;
   const canvas = document.getElementById(canvasId);
@@ -1289,7 +1383,7 @@ function drawFreqChart(tabId, chartKey, canvasSuffix, keys, coreKeys, freq, labe
   const datasets = keys.map(key => {
     const color = COLORS[coreKeys.indexOf(key) % COLORS.length];
     return {
-      label: key,
+      label: coreLabelFor(key),
       data: freq.map(p => p.frequencies[key]),
       borderColor: color,
       backgroundColor: color,
@@ -1309,6 +1403,8 @@ function drawFreqChart(tabId, chartKey, canvasSuffix, keys, coreKeys, freq, labe
       labels.at(-1),
       stepSize
   );
+
+  setFreqFootnote(canvas, clusterFrequencyRms(freq, keys));
 }
 
 function updateFreqChart(telemetry, tabId) {
@@ -1506,6 +1602,7 @@ function chartOptions(yLabel, latestTime, stepSize) {
 
   return {
     responsive: true,
+    maintainAspectRatio: false,
     animation: false,
     scales: {
       x: {
@@ -1536,6 +1633,7 @@ function chartOptions(yLabel, latestTime, stepSize) {
   const isPercentChart = yLabel === "CPU Usage (%)" || yLabel === "Battery Level (%)";
   return {
     responsive: true,
+    maintainAspectRatio: false,
     animation: false,
     elements: { point: { radius: 0 } },
     interaction: { mode: 'index', intersect: false },
@@ -2178,8 +2276,9 @@ function setupAiTelemetryCanvas(tabId) {
   // Add the vcat-ai-only "AI Processing Time" + "Temperature" charts.
   const grid = clone.querySelector(".dashboard-grid");
   if (grid) {
+    // Temperature is in the shared template now (next to Frame Drops), so only
+    // the vcat-ai-only charts are added here.
     grid.appendChild(makeChartWrapper("aiProcChart", "AI Processing Time (ms)"));
-    grid.appendChild(makeChartWrapper("tempChart", "Temperature"));
     grid.appendChild(makeChartWrapper("gpuChart", "Processor Usage (%)"));
   }
 
@@ -3489,7 +3588,11 @@ async function exportTabHtml(tabId) {
     if (!titleByKey[key]) titleByKey[key] = h3.textContent.trim();
   });
 
-  const keys = [];
+  // Rows follow the order the charts are laid out on screen — the template's
+  // grid is the single definition of that order, so the report and the panel
+  // can't drift apart. Anything charted but absent from this pane's DOM is
+  // appended rather than dropped.
+  const keys = Object.keys(titleByKey);
   sides.forEach(sd => Object.keys(chartsByTabId[sd] || {}).forEach(k => {
     if (!keys.includes(k)) keys.push(k);
   }));
@@ -3524,15 +3627,64 @@ async function exportTabHtml(tabId) {
     ? `VCAT comparison — ${sources.map(s => s.label).join(" vs ")}`
     : `VCAT results — ${sources[0].label}`;
 
-  const html = buildExportHtml({ title, columns, rows, css, chartLib, kept, total });
-  const stem = (comparison ? "compare_" : "report_") + exportStem(data);
-  downloadBlob(new Blob([html], { type: "text/html;charset=utf-8" }), `${stem}.html`);
+  const stem = reportFilenameStem(ctx.app, data);
+  const filename = promptForFilename(stem, "html");
+  if (!filename) return;
+
+  const details = data.map(exportTestDetailsCell);
+  const html = buildExportHtml({ title, columns, rows, details, css, chartLib, kept, total });
+  downloadBlob(new Blob([html], { type: "text/html;charset=utf-8" }), filename);
+}
+
+// The Test Details panel for one column, rebuilt as static markup. It reuses the
+// panel's own classes so the inlined stylesheet renders it identically — readonly
+// inputs and all — rather than approximating it with a different layout.
+function exportTestDetailsCell(payload) {
+  const td = (payload && payload.test_details) || {};
+  const v = td.currentTestVideo || {};
+  const clock = ((payload && payload.test_conditions) || {}).audioClock;
+
+  const field = (cls, value) =>
+    `<input class="${cls}" readonly value="${htmlEscape(value ?? "")}" />`;
+  const line = (label, cls, value) =>
+    `<div style="display:flex;gap:8px;margin-bottom:6px;">` +
+    `<label>${htmlEscape(label)}:</label> ${field(cls, value)}</div>`;
+  const vrow = (label, cls, value) =>
+    `<div class="test-video-row"><label>${htmlEscape(label)}:</label>${field(cls, value)}</div>`;
+
+  const fps = (typeof v.framerate === "number" && v.framerate > 0)
+    ? v.framerate.toFixed(1) : "";
+
+  return `<div class="chart-wrapper" style="background:black;color:white;">
+      <div class="test-details-top">
+        <h3>Test Details</h3>
+        ${line("State", "test-state", td.testState)}
+        ${line("Start Time", "test-start-time", td.startTime)}
+        ${line("Playlist", "test-playlist", getFileName(td.playlist || ""))}
+        ${clock === true || clock === false
+            ? line("Audio Clock", "test-audio-clock", clock ? "Yes" : "No")
+            : ""}
+        <fieldset class="current-test-video">
+          <legend>Current Test Video</legend>
+          <div class="test-video-list">
+            ${vrow("Start", "current-start-time", v.startTime)}
+            ${vrow("File", "test-file", getFileName(v.fileName || ""))}
+            ${vrow("Codec", "test-codec", v.videoCodec)}
+            ${vrow("Decoder", "test-decoder", v.videoDecoder)}
+            ${vrow("Resolution", "test-resolution", v.resolution)}
+            ${vrow("Mime Type", "test-mimetype", v.mimeType)}
+            ${vrow("Bitrate", "test-bitrate", v.bitrate)}
+            ${vrow("Frame Rate", "test-framerate", fps)}
+          </div>
+        </fieldset>
+      </div>
+    </div>`;
 }
 
 // Assemble the document. The panel's own stylesheet is inlined and reused, so the
 // export inherits the real look rather than a hand-rolled imitation; a short
 // override block replaces the parts that assume the live app shell.
-function buildExportHtml({ title, columns, rows, css, chartLib, kept, total }) {
+function buildExportHtml({ title, columns, rows, details, css, chartLib, kept, total }) {
   const cols = columns.length;
   const headCells = columns.map(c => `
       <div class="cmp-col-head">
@@ -3543,7 +3695,7 @@ function buildExportHtml({ title, columns, rows, css, chartLib, kept, total }) {
         </div>
       </div>`).join("");
 
-  const cells = [];
+  const cells = [...(details || [])];
   rows.forEach((row, r) => row.charts.forEach((chart, c) => {
     cells.push(chart
       ? `<div class="chart-wrapper"><h3>${htmlEscape(row.title)}</h3><canvas id="ch-${r}-${c}"></canvas></div>`
@@ -3573,6 +3725,11 @@ function buildExportHtml({ title, columns, rows, css, chartLib, kept, total }) {
   .chart-wrapper { background: #1b1b1b; border-radius: 8px; padding: 10px; }
   .chart-wrapper h3 { margin: 0 0 8px; font-size: 14px; color: #ddd; }
   .chart-wrapper canvas { width: 100% !important; height: 260px !important; }
+  /* Test Details is a form, not a chart — let it size to its content. */
+  .test-details-top { font-size: 13px; }
+  .test-details-top h3 { margin: 0 0 8px; font-size: 14px; color: #ddd; }
+  .test-details-top input { background: #111; color: #eee; border: 1px solid #444;
+                            border-radius: 4px; padding: 2px 6px; }
   .cmp-empty { display: flex; align-items: center; justify-content: center;
                min-height: 120px; }
 </style>
@@ -3664,6 +3821,47 @@ ROWS.forEach((row, r) => row.forEach((spec, c) => {
 }));
 <\/script>
 </body></html>`;
+}
+
+// Name a report after what was compared: the distinct codecs plus a timestamp.
+// Naming it after the decoders ran long fast — "vcat-damo266d-alivvc-bbcfbc8-dirty"
+// is one run — and several of those joined by _vs_ made the name unusable.
+// Timestamp is YYMMDD_HHMMSS; no colons, which are illegal in a file name on
+// Windows and shown as "/" by the macOS Finder.
+function reportFilenameStem(app, payloads) {
+  const codecs = [];
+  payloads.forEach(d => {
+    const v = ((d && d.test_details) || {}).currentTestVideo || {};
+    // codecLabel strips the "video/" prefix and uppercases, so a log recording
+    // "video/av02" and one recording "AV1" come out in the same shape.
+    const c = codecLabel(v.videoCodec).replace(/[^A-Za-z0-9.-]/g, "");
+    if (c && !codecs.includes(c)) codecs.push(c);
+  });
+
+  const t = new Date();
+  const pad = v => String(v).padStart(2, "0");
+  const stamp = `${pad(t.getFullYear() % 100)}${pad(t.getMonth() + 1)}${pad(t.getDate())}` +
+                `_${pad(t.getHours())}${pad(t.getMinutes())}${pad(t.getSeconds())}`;
+  const prefix = app === "vcat_ai" ? "vcatai_report" : "vcatd_report";
+
+  return [prefix, ...(codecs.length ? codecs : ["unknown"]), stamp].join("_");
+}
+
+// Ask what to call the file, offering the generated name as the default. Returns
+// null when the user cancels, so the caller abandons the export entirely rather
+// than writing something they didn't ask for.
+function promptForFilename(defaultStem, ext) {
+  const suggested = `${defaultStem}.${ext}`;
+  const answer = window.prompt(`Save ${ext.toUpperCase()} as:`, suggested);
+  if (answer === null) return null;
+
+  // Keep it a bare file name: a download can't choose a directory, and these
+  // characters are illegal in a file name on Windows (and confusing elsewhere).
+  let name = (answer.trim() || suggested)
+    .replace(/^.*[\\/]/, "")
+    .replace(/[<>:"|?*\x00-\x1f]/g, "_");
+  if (!name.toLowerCase().endsWith(`.${ext}`)) name += `.${ext}`;
+  return name;
 }
 
 function downloadBlob(blob, filename) {
@@ -4105,16 +4303,18 @@ async function exportTabSpreadsheet(tabId) {
       value: "temp", series: () => seriesFor("battery_temp") },
     { sheet: "System Health", metric: "System Thermal Status", unit: "Thermal status (0-5)",
       value: "status", series: () => seriesFor("system_thermal") },
+    // Frame Drops sits next to System Health: thermal throttling and dropped
+    // frames are read together, so they shouldn't be separated by the CPU sheets.
+    { sheet: "Frame Drops", metric: "Frame Drops", unit: "Dropped frames per hour",
+      value: "delta_framedrops", sum: true, series: () => seriesFor("frame_drops") },
+    { sheet: "Frame Drops", metric: "Dropped to Keyframe", unit: "Keyframe resyncs per hour",
+      value: "dropped_to_keyframe", sum: true, series: () => seriesFor("frame_drops") },
     { sheet: "CPU Frequency - Large Cores", metric: "CPU Frequency - Large Cores",
       unit: "Mean Large-Core Frequency (MHz)", value: "value",
       series: () => data.map(d => clusterFreqSeries(d.telemetry_data, "large")) },
     { sheet: "CPU Frequency - Small Cores", metric: "CPU Frequency - Small Cores",
       unit: "Mean Small-Core Frequency (MHz)", value: "value",
       series: () => data.map(d => clusterFreqSeries(d.telemetry_data, "small")) },
-    { sheet: "Frame Drops", metric: "Frame Drops", unit: "Dropped frames per hour",
-      value: "delta_framedrops", sum: true, series: () => seriesFor("frame_drops") },
-    { sheet: "Frame Drops", metric: "Dropped to Keyframe", unit: "Keyframe resyncs per hour",
-      value: "dropped_to_keyframe", sum: true, series: () => seriesFor("frame_drops") },
   ];
 
   const sheets = [];
@@ -4140,7 +4340,9 @@ async function exportTabSpreadsheet(tabId) {
   }
 
   const labels = comparisonSeriesLabels(data);
-  const stem = `hourly_${exportStem(data)}`;
+  const stem = reportFilenameStem(ctx.app, data);
+  const filename = promptForFilename(stem, "xlsx");
+  if (!filename) return;
   const infoRows = runFieldRows(sources, data);
 
   try {
@@ -4182,6 +4384,13 @@ async function exportTabSpreadsheet(tabId) {
               "event tally, not a level you can read off at a moment. Dropped to " +
               "Keyframe counts the subset severe enough to force a resync, and is " +
               "omitted entirely for logs predating header 3004, which never recorded it.",
+            "The f_rms block under each CPU Frequency chart is computed from the full " +
+              "source logs, not the hourly samples above it: every reading in the run, " +
+              "time-weighted so uneven sample spacing can't skew it, combined as " +
+              "sqrt((f1^2 + f2^2 + ... + fn^2) / n) across the cluster's cores. Squaring " +
+              "before averaging is the point — a cluster spending half its time at 2500 " +
+              "MHz and half at 500 MHz scores 1803, not 1500. It needs a log from header " +
+              "3004 on, so older logs show no block.",
             "CPU frequency is the mean clock across that cluster's cores in the sample " +
               "nearest the hour mark — also instantaneous, not an average over the hour. " +
               "Small cores are the lowest-clocked cluster; every other core counts as large.",
@@ -4194,15 +4403,7 @@ async function exportTabSpreadsheet(tabId) {
       try { msg = (await res.json()).message || msg; } catch (e) { /* not json */ }
       return alert(`Could not build the spreadsheet:\n\n${msg}`);
     }
-    const blob = await res.blob();
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = `${stem}.xlsx`;
-    document.body.appendChild(link);
-    link.click();
-    link.remove();
-    URL.revokeObjectURL(url);
+    downloadBlob(await res.blob(), filename);
   } catch (err) {
     console.error("Spreadsheet export failed:", err);
     alert("Spreadsheet export failed.");

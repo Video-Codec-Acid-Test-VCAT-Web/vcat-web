@@ -35,11 +35,12 @@ Excel workbook writer for telemetry data export.
 
 import atexit
 import json
+import math
 import os
 import re
 from datetime import datetime
 from enum import Enum
-from typing import Any, cast, Dict, List
+from typing import Any, cast, Dict, List, Optional
 
 from openpyxl import __version__, Workbook
 from openpyxl.styles import Font
@@ -358,9 +359,30 @@ def cleanup_all_workbooks():
 atexit.register(cleanup_all_workbooks)
 
 
-# A chart is 10 cm tall, which covers roughly 20 default-height rows. A block that
-# follows one has to clear that or the two charts land on top of each other.
-_CHART_ROWS = 21
+# Chart geometry, so placement is derived rather than guessed. A chart's height is
+# set in centimetres while a sheet is laid out in rows, and the conversion is what
+# decides where a chart's bottom edge actually falls.
+_CHART_HEIGHT_CM = 10
+_CHART_WIDTH_CM = 24
+_EMU_PER_CM = 360000
+_EMU_PER_POINT = 12700
+_DEFAULT_ROW_POINTS = 15          # Excel's default row height
+
+
+def _rows_spanned(height_cm: float) -> int:
+    """How many default-height rows a chart of this height covers."""
+    emu = height_cm * _EMU_PER_CM
+    per_row = _DEFAULT_ROW_POINTS * _EMU_PER_POINT
+    return int(math.ceil(emu / per_row))
+
+
+def _chart_bottom_row(anchor_row: int) -> int:
+    """Last row a chart anchored at `anchor_row` covers."""
+    return anchor_row + _rows_spanned(_CHART_HEIGHT_CM)
+
+
+# Gap left under a chart before whatever comes next.
+_AFTER_CHART_ROWS = 2
 
 # Excel rejects these in a sheet name, and caps the name at 31 characters.
 _BAD_SHEET_CHARS = "[]:*?/" + chr(92)
@@ -391,6 +413,7 @@ def _write_metric_block(
     series_labels: List[str],
     rows: List[List[Any]],
     info_rows: List[List[Any]] = None,
+    chart_caption: str = None,
 ) -> int:
     """Write one heading + table + chart starting at `start_row`.
 
@@ -429,18 +452,113 @@ def _write_metric_block(
         chart = LineChart()
         chart.title = f"{metric} by hour"
         chart.y_axis.title = unit or metric
-        chart.x_axis.title = "Elapsed time (hours)"
-        chart.height = 10
-        chart.width = 24
+        # The f_rms figures ride along in the x-axis caption so they are visible
+        # in the chart itself, in the empty strip beneath the plotted lines.
+        if chart_caption:
+            chart.x_axis.title = _axis_title_lines(
+                ["Elapsed time (hours)", chart_caption])
+        else:
+            chart.x_axis.title = "Elapsed time (hours)"
+        chart.height = _CHART_HEIGHT_CM
+        chart.width = _CHART_WIDTH_CM
         data = Reference(ws, min_col=2, max_col=1 + len(series_labels),
                          min_row=table_row, max_row=table_row + len(rows))
         cats = Reference(ws, min_col=1, min_row=table_row + 1,
                          max_row=table_row + len(rows))
         chart.add_data(data, titles_from_data=True)
         chart.set_categories(cats)
+
+        # openpyxl leaves <c:delete> out of the axis XML, and Excel's default for
+        # a missing one is to hide the axis — which takes its title with it, so the
+        # chart opens with both axes unlabelled even though the titles were set.
+        # It also defaults the category axis to the left; it belongs at the bottom.
+        chart.x_axis.delete = False
+        chart.y_axis.delete = False
+        chart.x_axis.axPos = "b"
+        chart.y_axis.axPos = "l"
+        chart.x_axis.majorTickMark = "out"
+        chart.y_axis.majorTickMark = "out"
+
         ws.add_chart(chart, f"{get_column_letter(3 + len(series_labels))}{table_row}")
 
-    return max(table_row + len(rows), table_row + _CHART_ROWS) + 2
+    # The next thing on the sheet has to clear both the table and the chart beside
+    # it, whichever reaches further down.
+    bottom = max(table_row + len(rows), _chart_bottom_row(table_row))
+    return bottom + _AFTER_CHART_ROWS
+
+
+def _axis_title_lines(lines: List[str]):
+    """An axis title made of several lines.
+
+    The x-axis caption sits in the empty strip under the plot, which is where the
+    f_rms figures belong: they describe the curves above them and should be
+    readable in the chart itself, not only in cells beside it.
+    """
+    from openpyxl.chart.title import Title
+    from openpyxl.chart.text import Text, RichText
+    from openpyxl.drawing.text import (
+        Paragraph, ParagraphProperties, RegularTextRun, CharacterProperties,
+    )
+
+    paras = []
+    for i, line in enumerate(lines):
+        props = CharacterProperties(sz=900, b=True) if i else CharacterProperties()
+        paras.append(Paragraph(
+            pPr=ParagraphProperties(defRPr=props),
+            r=[RegularTextRun(t=str(line))],
+        ))
+    return Title(tx=Text(rich=RichText(p=paras)))
+
+
+def _rms_caption(rms: Dict[str, Any], series_labels: List[str]) -> Optional[str]:
+    """One line summarising f_rms per log, for printing under the chart."""
+    for label, *values in (rms or {}).get("rows") or []:
+        if not str(label).startswith("f_rms (MHz)"):
+            continue
+        parts = [f"{name}: {v:g} MHz"
+                 for name, v in zip(series_labels, values) if v is not None]
+        return "f_rms — " + "   |   ".join(parts) if parts else None
+    return None
+
+
+def _write_rms_block(
+    ws: Worksheet, start_row: int, start_col: int,
+    spec: Dict[str, Any], series_labels: List[str],
+) -> None:
+    """The f_rms summary, written in the empty space directly under the chart.
+
+    It starts at the chart's own column rather than column A: the chart is
+    anchored to the right of the hourly table, so a block in column A lands under
+    the *table* and reads as unrelated to the chart it describes. Labels occupy
+    the first column, then one column per log in table order.
+    """
+    from openpyxl.styles import Alignment
+
+    title = ws.cell(row=start_row, column=start_col,
+                    value=str(spec.get("title") or "f_rms"))
+    title.font = Font(bold=True, size=12)
+
+    row_at = start_row + 1
+    for label, *values in spec.get("rows") or []:
+        cell = ws.cell(row=row_at, column=start_col, value=label)
+        cell.font = Font(bold=True)
+        for i, v in enumerate(values):
+            if v is not None:
+                ws.cell(row=row_at, column=start_col + 1 + i, value=v)
+        row_at += 1
+
+    note = spec.get("note")
+    if note:
+        row_at += 1
+        cell = ws.cell(row=row_at, column=start_col, value=note)
+        cell.font = Font(italic=True)
+        ws.merge_cells(start_row=row_at, start_column=start_col,
+                       end_row=row_at, end_column=start_col + len(series_labels))
+        cell.alignment = Alignment(horizontal="left")
+
+    # The label column carries the longest text in the block.
+    ws.column_dimensions[get_column_letter(start_col)].width = max(
+        ws.column_dimensions[get_column_letter(start_col)].width or 0, 28)
 
 
 def _write_metric_sheet(
@@ -448,10 +566,15 @@ def _write_metric_sheet(
     blocks: List[Dict[str, Any]],
     series_labels: List[str],
     info_rows: List[List[Any]] = None,
+    rms: Dict[str, Any] = None,
 ) -> None:
     """One topic per sheet, stacked top to bottom: each block is a heading, a
     chartable per-hour table and its line chart. The run-description block is
-    written once, above the first table, since it describes the whole sheet."""
+    written once, above the first table, since it describes the whole sheet. An
+    f_rms summary, when there is one, goes in the clear space below the last
+    chart."""
+    caption = _rms_caption(rms, series_labels) if rms else None
+
     row = 1
     for i, block in enumerate(blocks):
         row = _write_metric_block(
@@ -461,7 +584,14 @@ def _write_metric_sheet(
             series_labels,
             block.get("rows") or [],
             info_rows if i == 0 else None,
+            caption,
         )
+
+    if rms:
+        # `row` is already two rows below the last chart's bottom edge; the chart
+        # is anchored just right of the table, so match that column and the block
+        # sits in the empty space directly beneath the chart.
+        _write_rms_block(ws, row, 3 + len(series_labels), rms, series_labels)
 
 
 # The CSV table starts at the header row; everything above it is the JSON block.
@@ -522,6 +652,7 @@ def write_comparison_workbook(
     notes: List[str] = None,
     info_rows: List[List[Any]] = None,
     raw_sheets: List[Dict[str, Any]] = None,
+    rms_blocks: Dict[str, Any] = None,
 ) -> str:
     """Write one per-hour comparison sheet per metric, each ready to chart.
 
@@ -543,7 +674,8 @@ def write_comparison_workbook(
         title = str(spec.get("sheet") or spec.get("metric") or f"Metric {i + 1}")
         ws = cast(Worksheet, wb.active) if i == 0 else wb.create_sheet()
         ws.title = _safe_sheet_title(title, i)
-        _write_metric_sheet(ws, blocks, series_labels, info_rows)
+        _write_metric_sheet(ws, blocks, series_labels, info_rows,
+                            (rms_blocks or {}).get(title))
 
     # One sheet per source log, after the charts: the summary tables resample to
     # the hour, so the raw rows are the only way back to the underlying samples.

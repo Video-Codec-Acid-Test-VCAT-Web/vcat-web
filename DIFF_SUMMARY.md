@@ -27,10 +27,14 @@ sheets, and one verbatim sheet per source log; and (U) **runs labelled by decode
 than codec family; and (V) **audioClock** in Test Details; and (W) **dropped_to_keyframe**
 on the frame-drops graph; and (X) **device identity pinned** in the comparison header; and
 (Y) **live-session UX** — ramped polling and Disconnect on the live tab; and
-(Z) **standalone HTML export** — N logs in one self-contained interactive file.
+(Z) **standalone HTML export** — N logs in one self-contained interactive file; and
+(AA) **f_rms** — a time-weighted frequency RMS under each CPU frequency chart, on the
+page and in the workbook; and (AB) **reopen an exported workbook** — its embedded raw
+sheets rebuild the session; and (AC) **export polish** — named output files, a reading
+order shared by page and report, labelled spreadsheet axes.
 (A/B → `4fa2a5b`; C → `237b96a`; D → `61898ff`; E → `038ea4a`; F → `233d5d3`;
 G → `72f3786` (+ `1acbfdb`); H → `5ff0c88`/`36cfcd3`; I → `072d296`; J → `d4a15aa`;
-K–Q → `3be5654`/`025ab30`/`13a6dca`; R–Z are the current change.)
+K–Q → `3be5654`/`025ab30`/`13a6dca`; R–Z → `336a015`; AA–AC are the current change.)
 
 ---
 
@@ -748,6 +752,113 @@ horizontally at a 420 px floor per column, and the export reuses that CSS.
 
 ---
 
+## AA. Frequency RMS (f_rms)
+
+A single number for how hard a cluster was driven, time-weighted across the whole run.
+Squaring before averaging is the point: half a run at 2500 MHz and half at 500 MHz is
+**1803**, not the 1500 an arithmetic mean would report.
+
+### On the page (`static/main.js`)
+- `clusterFrequencyRms()` computes it in the browser from the series the chart is already
+  drawing — no server call, and it follows live sessions. Weights come from elapsed-time
+  gaps so uneven sample spacing can't skew it.
+- Caption under each CPU frequency chart: `f_rms 1465 (1439, 1446, 1475, 1500)` — cluster
+  total first, per-core figures bracketed in core order, unlabelled because the legend
+  above already names them. Worst case (six small cores) is ~338 px, inside the 420 px
+  comparison column floor.
+
+### In the workbook (`vcat_telemetry.py`, `vcat_telemetry_writer.py`)
+- `_cluster_rms()` recomputes it server-side from the **full** source log, not the hourly
+  table, for logs from header 3004 on. `_write_rms_block()` puts the breakdown — per-core
+  rows, % of max, scoring window, weighted duration — two rows under the chart, starting at
+  the chart's own column so it reads as part of it.
+- The headline figures also ride in the chart's x-axis caption, so they are visible in the
+  chart image itself.
+- `tests_rms.py` covers the RMS identities, weighting, 4+4 and 1+3+4 core layouts, the
+  `empty`-row filter, version gating, homogeneous CPUs and window filtering.
+
+### Three corrections to the original specification
+- **Time comes from `test.timestamp` deltas**, not `test.duration_ms`. That column resets
+  at every clip — 10 resets in a 39-row log — so using it yields negative weights. Only 8
+  of 842 local logs even carry it; 688 carry `test.duration` instead.
+- **`parse_cores` no longer requires a `Cortex-` prefix.** 117 logs (every vcat-ai log and
+  every Pixel 8 / SM-S938U1 snapshot) record `"null: 3532 MHz"`, which yielded zero cores —
+  so classification silently failed, taking the large/small split with it. Only the MHz is
+  required now. `DeviceInfo.from_dict` routes through the same function instead of keeping
+  a second copy.
+- **Placement is derived from chart geometry** (`_rows_spanned`, `_chart_bottom_row`)
+  rather than a hand-tuned row count, since a 10 cm chart is 19 default-height rows.
+
+---
+
+## AB. Reopening an exported workbook
+
+`upload_session` now accepts `.xlsx`: `_logs_from_workbook()` finds the verbatim log sheets,
+rebuilds each source file, and opens them — one log as a session tab, several as the
+comparison they came from. A workbook without raw sheets, or one that isn't a workbook,
+says so rather than failing obscurely.
+
+Round-trip is semantically exact: line counts match, and `cpu_freq`, `cpu_usage`, memory,
+`frame_drops`, thermal, `test_details` and `device_info` all come back identical. The one
+drift is storage precision — `4901.0309278350505` returns as `4901.030927835051`, a
+**1.9e-16** relative difference, below float64 epsilon. The raw sheets hold numbers *as*
+numbers so they stay chartable; preserving the 17th significant digit would mean storing
+them as text and losing that.
+
+---
+
+## AC. Export polish
+
+### Named output files
+Both exports prompt for a name, defaulting to
+`vcatd_report_<codec1>_<codec2>_…_YYMMDD_HHMMSS.xlsx|html`. Naming by decoder ran long fast
+(`vcat-damo266d-alivvc-bbcfbc8-dirty` is one run); codecs are deduped and normalised, so a
+log recording `video/av02` and one recording `AV1` don't appear twice. No colons in the
+timestamp — illegal on Windows, shown as `/` by the macOS Finder. The prefix follows the
+app, so a vcat-ai export isn't labelled `vcatd_`.
+
+### One reading order, defined once
+Page and HTML report both run Test Details, Battery, Frame Drops, Temperature, CPU Freq
+Large, CPU Freq Small, CPU Usage, Memory. The template's grid is the single definition —
+the report reads the rendered DOM, so the two can't drift. Temperature moved into the
+template (it used to be appended last at runtime) to sit beside Frame Drops.
+
+### Spreadsheet axis labels
+Axis titles were being written all along but never rendered: openpyxl omits `<c:delete>`,
+and Excel's default for a missing one is to **hide the axis**, taking its title with it.
+`delete = False` on both axes fixes it; the category axis was also positioned left rather
+than bottom, and tick marks were off.
+
+### HTML report fidelity
+Charts are lifted off the live `Chart` instances, but tick and tooltip **callbacks are
+functions and cannot survive JSON** — without restating them the x axis rendered raw
+elapsed seconds instead of `hh:mm`. Axis settings (`stepSize`, `min`, the 0–100 clamp) now
+travel too, and the Test Details panel is rebuilt as the report's first row using the
+panel's own classes. Zoom is off, matching the panel, so the zoom plugin is no longer
+inlined (0.45 → 0.28 MB).
+
+### Frame Drops sheet
+Sums each hour rather than sampling it: a drop count is an event tally, not a level. On
+`logs_1765070594349.csv` the sum shows 760 of 769 drops in hour 4, where the
+reading-nearest-the-hour rule showed 0. Hours past a log's end stay blank, not 0.
+
+### Smaller fixes
+- **Codec normalised to mime form.** dav1d logs a bare `AV1` where every other plugin logs
+  `video/...`; the app is moving to `video/av1`, so old logs are brought into line
+  (`normalize_codec_name`). Deliberately narrow — an unrecognised bare value passes through.
+- **Frequency series labelled `cpu0…cpuN`.** A log's `cpu.freq0` arrives as `freq0` while
+  the live worker emits `core0`, so the same core was labelled differently depending on
+  whether you watched live or opened the log afterwards. Both now match CPU Usage.
+- **`Mime Type: None`** — the reader defaulted to the literal string `"None"`, and no
+  vcat-d log has a `video.mime` column, so every log displayed the word "None".
+- **Chart cards lay out properly.** `.chart-wrapper` is a fixed 350 px box while Chart.js
+  defaulted to `maintainAspectRatio: true`, so the canvas sized itself from the column
+  width and anything appended below it rendered outside the card. The card is now a flex
+  column and charts fill it.
+- **Frame drop colours**: ordinary drops orange, keyframe resyncs red.
+
+---
+
 ## ⚠️ Notes before pushing
 
 - **Debug timing values** are currently in place and should likely be reverted:
@@ -768,7 +879,8 @@ horizontally at a 420 px floor per column, and the export reuses that CSS.
 - **`transform.inference_cpu_time`** older logs stored tiny values (non-ns); newer logs use
   ns. Missing/unparseable values render as 0.
 - **PDF is capped at two logs** (`PDF_MAX_COLUMNS`); the spreadsheet and the HTML
-  export have no limit (see § Z).
+  export have no limit (see § Z). The PDF also still orders its rows by chart-creation
+  order and names files by decoder, so it is the one export that does not follow § AC.
 - **`chartOptions()` is declared twice** in `static/main.js` and the **second** declaration
   is the effective one. Edits to the first have no effect — it should be deleted.
 - **Exports need a loaded payload**, so they are disabled on the **live** tab (same rule as

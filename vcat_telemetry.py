@@ -42,6 +42,7 @@ import bisect
 import csv
 import io
 import json
+import math
 import os
 import random
 import shutil
@@ -474,7 +475,7 @@ def get_test_details(session_id, device_id: str) -> TestDetails:
             currentTestVideo=CurrentTestVideo(
                 fileName=video.get("fileName", ""),
                 startTime=video.get("startTime", ""),
-                videoCodec=video.get("videoCodec", ""),
+                videoCodec=normalize_codec_name(video.get("videoCodec", "")),
                 videoDecoder=video.get("videoDecoder", ""),
                 resolution=video.get("resolution", ""),
                 mimeType=video.get("mimeType", ""),
@@ -2237,6 +2238,63 @@ def api_saved_sessions(session_id):
     return jsonify([{"name": f} for f in files])
 
 
+# The raw sheets an export embeds are the complete original files, so a workbook
+# can be opened straight back up: JSON header in column A, then the table.
+_RAW_SHEET_HEADER = "test.timestamp"
+
+
+def _cell_text(v) -> str:
+    """Render a cell the way it was logged. Numbers were stored as numbers so the
+    sheet stays chartable, which turns an integer like a timestamp into 1.79e12
+    float on the way back; integral floats are written back without the `.0`."""
+    if v is None:
+        return ""
+    if isinstance(v, float) and v.is_integer():
+        return str(int(v))
+    return str(v)
+
+
+def _logs_from_workbook(path: str) -> list:
+    """Rebuild each embedded log from an exported workbook.
+
+    Returns [{"sheet": title, "text": original file contents}, ...]; sheets that
+    aren't raw logs (the per-hour metric sheets, About) are skipped.
+    """
+    from openpyxl import load_workbook
+    import csv as _csv
+    import io
+
+    wb = load_workbook(path, read_only=True, data_only=True)
+    out = []
+    for ws in wb.worksheets:
+        rows = [r for r in ws.iter_rows(values_only=True)]
+        header_at = next(
+            (i for i, r in enumerate(rows)
+             if r and isinstance(r[0], str) and r[0].startswith(_RAW_SHEET_HEADER)),
+            None,
+        )
+        if header_at is None:
+            continue  # a metric sheet or About, not a log
+
+        buf = io.StringIO()
+        # Preamble: column A only — the JSON was written one line per row.
+        for r in rows[:header_at]:
+            buf.write(_cell_text(r[0] if r else "") + "\n")
+
+        w = _csv.writer(buf, lineterminator="\n")
+        for r in rows[header_at:]:
+            cells = list(r or ())
+            while cells and cells[-1] is None:
+                cells.pop()          # trailing blanks were never in the original
+            if not cells:
+                continue
+            w.writerow([_cell_text(c) for c in cells])
+
+        out.append({"sheet": ws.title, "text": buf.getvalue()})
+    wb.close()
+    return out
+
+
 @app.route("/api/vcat_monitor/upload_session", methods=["POST"])
 @require_valid_session
 def api_upload_session(session_id):
@@ -2248,7 +2306,247 @@ def api_upload_session(session_id):
     name = os.path.basename(f.filename)
     path = os.path.join(_uploads_dir(), name)
     f.save(path)
+
+    # An exported workbook carries its source logs verbatim, so opening one means
+    # unpacking those sheets back into CSVs and opening them as normal sessions.
+    if name.lower().endswith((".xlsx", ".xlsm")):
+        try:
+            found = _logs_from_workbook(path)
+        except Exception as e:
+            logger.error(f"workbook open failed: {e}")
+            return jsonify({"status": "error",
+                            "message": f"Could not read that workbook: {e}"}), 400
+        if not found:
+            return jsonify({"status": "error", "message":
+                            "That spreadsheet has no raw log sheets — only exports "
+                            "that embed the source logs can be reopened."}), 400
+
+        logs = []
+        for i, item in enumerate(found):
+            stem = os.path.splitext(os.path.basename(item["sheet"]))[0] or f"log{i + 1}"
+            out_name = f"{stem}.csv"
+            out_path = os.path.join(_uploads_dir(), out_name)
+            with open(out_path, "w", encoding="utf-8", newline="") as fh:
+                fh.write(item["text"])
+            logs.append({
+                "name": out_name,
+                "label": item["sheet"],
+                "app": _detect_app_from_file(out_path, out_name),
+            })
+        return jsonify({"status": "ok", "kind": "workbook", "logs": logs})
+
     return jsonify({"status": "ok", "name": name, "app": _detect_app_from_file(path, name)})
+
+
+def _resolve_raw_source(session_id, src) -> Optional[str]:
+    """Host-side path for an export source — a saved file as-is, a device file
+    pulled to a temp copy. Returns None if it can't be reached; callers skip that
+    source rather than failing the whole export."""
+    path = str((src or {}).get("path") or "")
+    if not path:
+        return None
+    try:
+        if src.get("kind") == "device":
+            device_id = str(src.get("device") or "")
+            if not device_id:
+                return None
+            local = get_device_file(
+                session_id=session_id, device_id=device_id,
+                device_file_path=path, force_temp=True,
+            )
+        else:
+            local = _resolve_saved_file(path)
+    except Exception as e:
+        logger.warning(f"could not resolve source {path}: {e}")
+        return None
+    if not local or not os.path.isfile(local):
+        logger.warning(f"source not found on host: {path}")
+        return None
+    return local
+
+
+# --- Frequency RMS (f_rms) ----------------------------------------------------
+# A time-weighted root-mean-square of the per-core clocks, computed from the full
+# source log rather than the hourly table above it. The hourly table samples one
+# reading an hour; this summarises every sample in the run.
+#
+# Only logs from header 3004 on are summarised — older ones get no block rather
+# than a number computed from a format this was never validated against.
+RMS_MIN_HEADER = 3004
+
+# The clip-relative columns (test.duration / test.duration_ms) reset at every new
+# video, so they cannot carry the time axis. Elapsed time comes from the timestamp
+# delta, the way the reader derives it.
+_RMS_TIME_COL = "test.timestamp"
+
+
+def _rms(values) -> float:
+    """Root mean square. Squaring before averaging is the whole point: a cluster
+    sitting half its time at 2500 MHz and half at 500 MHz is not a 1500 MHz
+    cluster, and a plain mean would say it was."""
+    vals = [v for v in values if v is not None]
+    if not vals:
+        return 0.0
+    return math.sqrt(sum(v * v for v in vals) / len(vals))
+
+
+def _sample_weights(times):
+    """Seconds each sample stands for, so uneven spacing can't skew the result.
+
+    Interior samples take half the gap either side; the ends take their single
+    adjacent gap. A lone sample represents nothing measurable, so it weighs 0.
+    """
+    n = len(times)
+    if n < 2:
+        return [0.0] * n
+    out = [0.0] * n
+    out[0] = times[1] - times[0]
+    out[-1] = times[-1] - times[-2]
+    for i in range(1, n - 1):
+        out[i] = (times[i + 1] - times[i - 1]) / 2.0
+    return [max(0.0, w) for w in out]
+
+
+def _read_rms_rows(path: str):
+    """(header_version, cores, rows) from a log, where rows are
+    (elapsed_s, {core_index: mhz}) with placeholder rows dropped."""
+    import csv as _csv
+
+    with open(path, "r", encoding="utf-8", errors="replace") as fh:
+        lines = fh.readlines()
+    head_at = next(
+        (i for i, l in enumerate(lines) if l.startswith("test.timestamp")), None
+    )
+    if head_at is None:
+        return 0, [], []
+
+    try:
+        header = json.loads("".join(lines[:head_at - 1]).rsplit("}", 1)[0] + "}")
+    except Exception:
+        return 0, [], []
+
+    version = header.get("header_version") or 0
+    cores = parse_cores(
+        ((header.get("device_info") or {}).get("cpu") or {}).get("cores") or {}
+    )
+
+    rows, t0 = [], None
+    for row in _csv.DictReader(lines[head_at:]):
+        # "empty" marks a gap in the playlist, not a measured sample.
+        if (row.get("test.filename") or "").strip() == "empty":
+            continue
+        try:
+            stamp = float(row[_RMS_TIME_COL])
+        except (TypeError, ValueError, KeyError):
+            continue
+        if t0 is None:
+            t0 = stamp
+        freqs = {}
+        for key, value in row.items():
+            if not key.startswith("cpu.freq"):
+                continue
+            try:
+                freqs[int(key[len("cpu.freq"):])] = float(value)
+            except (TypeError, ValueError):
+                pass
+        if freqs:
+            rows.append(((stamp - t0) / 1000.0, freqs))
+    return version, cores, rows
+
+
+def _cluster_rms(path: str, cluster: str, window=None):
+    """f_rms for one cluster of one log, or None when it can't be summarised."""
+    version, cores, rows = _read_rms_rows(path)
+    if version < RMS_MIN_HEADER or not cores or not rows:
+        return None
+
+    clocks = [c.frequency_mhz for c in cores if c.frequency_mhz]
+    if len(set(clocks)) < 2:
+        return None          # homogeneous CPU: no large/small distinction to draw
+    smallest = min(clocks)
+    want_small = cluster == "small"
+    ids = [c.core_id for c in cores
+           if c.frequency_mhz and ((c.frequency_mhz == smallest) == want_small)]
+    max_of = {c.core_id: c.frequency_mhz for c in cores}
+    if not ids:
+        return None
+
+    start_s = (window or {}).get("start_min")
+    end_s = (window or {}).get("end_min")
+    lo = (start_s or 0) * 60.0
+    hi = end_s * 60.0 if end_s else None
+    # Filter first, then weight: weighting before the cut would let excluded
+    # samples lend their span to the ones that survive.
+    kept = [(t, f) for t, f in rows if t >= lo and (hi is None or t <= hi)]
+    if len(kept) < 2:
+        return None
+
+    times = [t for t, _ in kept]
+    weights = _sample_weights(times)
+    total = sum(weights)
+    if total <= 0:
+        return None
+
+    per_core, per_core_ratio = {}, []
+    for cid in ids:
+        num = sum(w * (f.get(cid, 0.0) ** 2) for w, (_, f) in zip(weights, kept))
+        core_rms = math.sqrt(num / total)
+        per_core[cid] = core_rms
+        if max_of.get(cid):
+            per_core_ratio.append(core_rms / max_of[cid])
+
+    return {
+        "f_rms": _rms(per_core.values()),
+        "pct_of_max": _rms(per_core_ratio) * 100.0 if per_core_ratio else None,
+        "per_core": per_core,
+        "weighted_hours": total / 3600.0,
+        "window": (
+            f"{int(start_s or 0)}-{int(end_s)} min" if end_s else
+            (f"{int(start_s)} min-end" if start_s else "0-end")
+        ),
+    }
+
+
+def _rms_block(session_id, raw_sources, cluster, window=None):
+    """The f_rms summary for one cluster across every column, shaped for the
+    writer. Returns None when no column could be summarised."""
+    per_log = []
+    for src in raw_sources or []:
+        local = _resolve_raw_source(session_id, src)
+        try:
+            per_log.append(_cluster_rms(local, cluster, window) if local else None)
+        except Exception as e:
+            logger.warning(f"f_rms failed for {src.get('path')}: {e}")
+            per_log.append(None)
+
+    if not any(per_log):
+        return None
+
+    def row(label, fn):
+        return [label] + [None if r is None else fn(r) for r in per_log]
+
+    rows = [
+        row("f_rms (MHz)", lambda r: round(r["f_rms"])),
+        row("% of max", lambda r: None if r["pct_of_max"] is None
+            else round(r["pct_of_max"], 1)),
+    ]
+    # Devices differ, so the per-core rows are the union of core indices seen.
+    core_ids = sorted({cid for r in per_log if r for cid in r["per_core"]})
+    for cid in core_ids:
+        rows.append(row(f"f_rms cpu{cid} (MHz)",
+                        lambda r, c=cid: None if c not in r["per_core"]
+                        else round(r["per_core"][c])))
+    rows.append(row("Scoring window", lambda r: r["window"]))
+    rows.append(row("Weighted duration (h)", lambda r: round(r["weighted_hours"], 2)))
+
+    return {
+        "title": ("Large-core frequency RMS (f_rms)" if cluster == "large"
+                  else "Small-core frequency RMS (f_rms)"),
+        "rows": rows,
+        "note": ("Lower is better: less time at high clocks on the large cores."
+                 if cluster == "large"
+                 else "Higher is better: more work running on the efficient cores."),
+    }
 
 
 def _raw_log_sheets(session_id, raw_sources) -> list:
@@ -2262,22 +2560,10 @@ def _raw_log_sheets(session_id, raw_sources) -> list:
     out = []
     for src in raw_sources or []:
         path = str(src.get("path") or "")
-        if not path:
-            continue
         label = str(src.get("label") or os.path.basename(path))
         try:
-            if src.get("kind") == "device":
-                device_id = str(src.get("device") or "")
-                if not device_id:
-                    continue
-                local = get_device_file(
-                    session_id=session_id, device_id=device_id,
-                    device_file_path=path, force_temp=True,
-                )
-            else:
-                local = _resolve_saved_file(path)
-            if not local or not os.path.isfile(local):
-                logger.warning(f"raw sheet: could not resolve {path}")
+            local = _resolve_raw_source(session_id, src)
+            if not local:
                 continue
             with open(local, "r", encoding="utf-8", errors="replace") as fh:
                 out.append({"sheet": label, "text": fh.read()})
@@ -2340,6 +2626,14 @@ def api_comparison_workbook(session_id):
             body.get("notes") or [],
             body.get("info_rows") or [],
             _raw_log_sheets(session_id, body.get("raw_sources")),
+            {
+                "CPU Frequency - Large Cores":
+                    _rms_block(session_id, body.get("raw_sources"), "large",
+                               body.get("rms_window")),
+                "CPU Frequency - Small Cores":
+                    _rms_block(session_id, body.get("raw_sources"), "small",
+                               body.get("rms_window")),
+            },
         )
         name_root = re.sub(r"[^A-Za-z0-9._-]", "_", str(body.get("name") or "comparison"))
         return send_file(

@@ -49,6 +49,7 @@ __all__ = [
     "CpuFreguencyEntry",
     "CpuUsageEntry",
     "CurrentTestVideo",
+    "normalize_codec_name",
     "DeviceInfo",
     "DisplayResolution",
     "FramedropEntry",
@@ -56,6 +57,7 @@ __all__ = [
     "LRUCache",
     "MemoryEntry",
     "MemoryInfo",
+    "parse_cores",
     "parse_device_info",
     "playlist_name",
     "playlist_ref",
@@ -203,15 +205,7 @@ class DeviceInfo:
     @classmethod
     def from_dict(cls, data: dict, ip_addr: str = "none") -> "DeviceInfo":
         cpu_data = data.get("cpu", {})
-        core_objs = []
-
-        for label, desc in cpu_data.get("cores", {}).items():
-            match = re.match(r"Cortex-([A-Z0-9\-]+).*?(\d+)\s*MHz", desc)
-            if match:
-                core_type = f"Cortex-{match.group(1)}"
-                frequency = int(match.group(2))
-                core_id = int(label.replace("core", ""))
-                core_objs.append(CoreInfo(core_id=core_id, core_type=core_type, frequency_mhz=frequency))
+        core_objs = parse_cores(cpu_data.get("cores", {}))
 
         return cls(
             manufacturer=data.get("manufacturer", ""),
@@ -222,7 +216,7 @@ class DeviceInfo:
             ip_addr=ip_addr,
             cpu=CPUInfo(
                 architecture=cpu_data.get("architecture", ""),
-                cores=sorted(core_objs, key=lambda c: c.core_id)
+                cores=core_objs
             ),
             display_resolution=DisplayResolution(**data.get("display_resolution", {})),
             memory=MemoryInfo(**data.get("memory", {})),
@@ -329,6 +323,22 @@ class GpuFrameStatsEntry:
 class SystemThermalStatus:
     elapsed_time: float = 0.0
     status: int = 0
+
+
+def normalize_codec_name(value: str) -> str:
+    """Canonicalise a logged codec to its mime form.
+
+    dav1d reports a bare "AV1" where every other plugin reports a mime type. The
+    app side is being changed to emit "video/av1", so existing logs are brought
+    into line here — otherwise one codec carries two spellings through chart
+    legends, export file names and comparison grouping, and the same codec reads
+    as two different runs.
+
+    Deliberately narrow: dav1d is the only plugin with this, so any other value is
+    passed through exactly as logged rather than guessed at.
+    """
+    v = (value or "").strip()
+    return "video/av1" if v.lower() == "av1" else v
 
 
 @dataclass
@@ -560,16 +570,30 @@ def make_empty_ai_telemetry_data() -> VcataiTelemetryData:
 
 
 def parse_cores(core_dict: dict) -> List[CoreInfo]:
+    """Parse the header's per-core descriptors into CoreInfo.
+
+    The clock is what matters — it drives the large/small split and the frequency
+    RMS — and it is present even when the core name is not. Requiring a "Cortex-"
+    prefix threw away every core on devices that log "null: 3532 MHz", which is
+    what a Galaxy S25 writes, so the name is now optional and only the MHz is
+    required.
+    """
     cores = []
-    for core_label, desc in core_dict.items():
-        match = re.match(r"Cortex-([A-Z0-9\-]+).*?(\d+)\s*MHz", desc)
-        if match:
-            core_type = f"Cortex-{match.group(1)}"
-            frequency = int(match.group(2))
-            core_id = int(core_label.replace("core", ""))
-            cores.append(
-                CoreInfo(core_id=core_id, core_type=core_type, frequency_mhz=frequency)
-            )
+    for core_label, desc in (core_dict or {}).items():
+        text = str(desc)
+        mhz = re.search(r"(\d+)\s*MHz", text)
+        if not mhz:
+            continue
+        named = re.match(r"Cortex-([A-Z0-9\-]+)", text)
+        try:
+            core_id = int(str(core_label).replace("core", ""))
+        except ValueError:
+            continue
+        cores.append(CoreInfo(
+            core_id=core_id,
+            core_type=f"Cortex-{named.group(1)}" if named else "",
+            frequency_mhz=int(mhz.group(1)),
+        ))
     return sorted(cores, key=lambda c: c.core_id)
 
 

@@ -28,7 +28,7 @@
         <div id="snapshot-actions" style="display: flex; gap: 14px; align-items: center; margin-top: 8px;">
             <img id="save-snapshot-btn" src="/static/btn_save_snapshot.png" onclick="saveLiveSession()" title="Save a snapshot of the live session" style="height: 44px; width: auto; cursor: pointer; opacity: 0.4; pointer-events: none;" />
             <img id="load-snapshot-btn" src="/static/btn_load_snapshot.png" onclick="document.getElementById('load-file').click()" title="Open a local session file (CSV) — no device required" style="height: 44px; width: auto; cursor: pointer;" />
-            <input type="file" id="load-file" accept=".csv" style="display: none;" onchange="handleLoadFile(this)" />
+            <input type="file" id="load-file" accept=".csv,.xlsx" style="display: none;" onchange="handleLoadFile(this)" />
             <input type="file" id="compare-file" accept=".csv" style="display: none;" onchange="handleCompareFileInput(this)" />
         </div>
         <!--snapshot actions -->
@@ -316,10 +316,21 @@
                 </div>
             </div>
 
-            <!-- Chart Areas -->
+            <!-- Chart Areas. This order is the single source of truth: the HTML
+                 export reads the rendered grid, so a report comes out in the same
+                 order as the screen. Outcome first (battery, drops, thermals),
+                 then the causes (clocks, CPU, memory). -->
             <div class="chart-wrapper">
-                <h3>CPU Usage (%)</h3>
-                <canvas class="cpuChart" data-id="cpuChart"></canvas>
+                <h3>Battery Level</h3>
+                <canvas class="batteryChart" data-id="batteryChart"></canvas>
+            </div>
+            <div class="chart-wrapper">
+                <h3>Frame Drops</h3>
+                <canvas class="frameDropChart" data-id="frameDropChart"></canvas>
+            </div>
+            <div class="chart-wrapper">
+                <h3>Temperature</h3>
+                <canvas class="tempChart" data-id="tempChart"></canvas>
             </div>
             <div class="chart-wrapper">
                 <h3>CPU Frequency - Large Cores (MHz)</h3>
@@ -330,16 +341,12 @@
                 <canvas class="freqChartSmall" data-id="freqChartSmall"></canvas>
             </div>
             <div class="chart-wrapper">
+                <h3>CPU Usage (%)</h3>
+                <canvas class="cpuChart" data-id="cpuChart"></canvas>
+            </div>
+            <div class="chart-wrapper">
                 <h3>Memory Usage (MB)</h3>
                 <canvas class="memoryChart" data-id="memoryChart"></canvas>
-            </div>
-            <div class="chart-wrapper">
-                <h3>Frame Drops</h3>
-                <canvas class="frameDropChart" data-id="frameDropChart"></canvas>
-            </div>
-            <div class="chart-wrapper">
-                <h3>Battery Level</h3>
-                <canvas class="batteryChart" data-id="batteryChart"></canvas>
             </div>
 
         </div>

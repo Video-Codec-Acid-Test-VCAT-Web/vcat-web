@@ -294,10 +294,12 @@ def read_telemetry_data(session_id, telemetry_file) -> VcatdTelemetryData:
     current_video = CurrentTestVideo(
         fileName=os.path.basename(filename),
         startTime=test_start_time,
-        videoCodec=rows[0]["video.codec_name"],
+        videoCodec=normalize_codec_name(rows[0]["video.codec_name"]),
         videoDecoder=rows[0]["video.decoder_name"],
         resolution=rows[0]["video.resolution"],
-        mimeType=rows[0].get("video.mime", "None"),
+        # Default was the literal string "None", which rendered as the word "None"
+        # in Test Details for every log without a video.mime column (all of them).
+        mimeType=rows[0].get("video.mime", "") or "",
         bitrate=rows[0]["video.bitrate"],
         framerate=parse_float(rows[0]["video.framerate"]),
     )
