@@ -766,6 +766,11 @@ Squaring before averaging is the point: half a run at 2500 MHz and half at 500 M
   total first, per-core figures bracketed in core order, unlabelled because the legend
   above already names them. Worst case (six small cores) is ~338 px, inside the 420 px
   comparison column floor.
+- The HTML report carries the caption too. It is a sibling `<div>` of the canvas rather
+  than part of the chart config, so `serializeChart()` — which otherwise lifts everything
+  off the live `Chart` instance — could not see it and had to read it off the wrapper. The
+  export also releases the panel's fixed 350 px card height, or the caption is pushed out
+  of the card exactly as it was on the page.
 
 ### In the workbook (`vcat_telemetry.py`, `vcat_telemetry_writer.py`)
 - `_cluster_rms()` recomputes it server-side from the **full** source log, not the hourly

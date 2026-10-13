@@ -3532,7 +3532,14 @@ function serializeChart(chart) {
   const x = chart.options?.scales?.x || {};
   const y = chart.options?.scales?.y || {};
 
+  // The f_rms caption lives in the DOM beside the canvas, not in the chart
+  // config, so it has to be read off the wrapper to survive into the export.
+  const wrapper = chart.canvas && chart.canvas.closest(".chart-wrapper");
+  const footnote = (wrapper && wrapper.querySelector(".chart-footnote")
+    ? wrapper.querySelector(".chart-footnote").textContent : "") || "";
+
   return {
+    footnote,
     labels: pick(labels),
     kept: idx ? idx.length : labels.length,
     total: labels.length,
@@ -3697,8 +3704,10 @@ function buildExportHtml({ title, columns, rows, details, css, chartLib, kept, t
 
   const cells = [...(details || [])];
   rows.forEach((row, r) => row.charts.forEach((chart, c) => {
+    const caption = chart && chart.footnote
+      ? `<div class="chart-footnote">${htmlEscape(chart.footnote)}</div>` : "";
     cells.push(chart
-      ? `<div class="chart-wrapper"><h3>${htmlEscape(row.title)}</h3><canvas id="ch-${r}-${c}"></canvas></div>`
+      ? `<div class="chart-wrapper"><h3>${htmlEscape(row.title)}</h3><canvas id="ch-${r}-${c}"></canvas>${caption}</div>`
       : `<div class="chart-wrapper cmp-empty">${htmlEscape(row.title)} — not recorded in this log</div>`);
   }));
 
@@ -3722,7 +3731,8 @@ function buildExportHtml({ title, columns, rows, details, css, chartLib, kept, t
   .compare-heads { grid-template-columns: repeat(${cols}, minmax(420px, 1fr)); }
   .compare-grid { display: grid; gap: 10px; padding: 10px;
                   grid-template-columns: repeat(${cols}, minmax(420px, 1fr)); }
-  .chart-wrapper { background: #1b1b1b; border-radius: 8px; padding: 10px; }
+  .chart-wrapper { background: #1b1b1b; border-radius: 8px; padding: 10px;
+                   height: auto; display: flex; flex-direction: column; }
   .chart-wrapper h3 { margin: 0 0 8px; font-size: 14px; color: #ddd; }
   .chart-wrapper canvas { width: 100% !important; height: 260px !important; }
   /* Test Details is a form, not a chart — let it size to its content. */
