@@ -3,7 +3,8 @@ sys.path.insert(0, os.getcwd())
 
 src = open("vcat_telemetry.py").read()
 tree = ast.parse(src)
-want = {"_rms", "_sample_weights", "_read_rms_rows", "_cluster_rms"}
+want = {"_rms", "_sample_weights", "_read_rms_rows", "_cluster_rms",
+        "_weighted_percentile"}
 ns = {"math": math, "json": json, "os": os}
 from vcat_telemetry_data_models import parse_cores
 ns["parse_cores"] = parse_cores
@@ -107,6 +108,41 @@ check("window label", win["window"], "30-60 min")
 check("windowed f_rms == 500 (low half only)", win["f_rms"], 500.0, tol=5)
 check("full-run f_rms is higher", full["f_rms"] > win["f_rms"], True)
 check("windowed duration ~0.5h", win["weighted_hours"], 0.5, tol=0.02)
+
+
+# ---- weighted percentiles and the minimum -----------------------------------
+_wp = ns["_weighted_percentile"]
+print("\nWeighted percentiles:")
+flat = [(2000, 1)] * 10
+check("uniform -> that value (p50)", _wp(flat, 50), 2000)
+check("uniform -> that value (p5)", _wp(flat, 5), 2000)
+ramp = [(v, 1) for v in range(1, 101)]
+check("1..100 p50", _wp(ramp, 50), 50, tol=1)
+check("1..100 p95", _wp(ramp, 95), 95, tol=1)
+check("1..100 p5", _wp(ramp, 5), 5, tol=1)
+check("empty -> None", _wp([], 50), None)
+check("zero weights -> None", _wp([(100, 0)], 50), None)
+
+# Weighting must beat raw counts: one long stretch low, many brief samples high.
+skew = [(2400, 1)] * 20 + [(1200, 200)]
+check("long low stretch outweighs many brief highs", _wp(skew, 50), 1200)
+check("same data unweighted would say 2400", sorted([v for v, _ in skew])[len(skew)//2], 2400)
+
+print("\nThe discriminating case (same f_rms and p50, different floor):")
+steady = [(2427, 100)] * 10
+dipped = [(2427, 100)] * 9 + [(1196, 1)] + [(2427, 99)]
+check("medians match", _wp(steady, 50) == _wp(dipped, 50), True)
+check("steady floor", min(v for v, _ in steady), 2427)
+check("dipped floor exposes the stall", min(v for v, _ in dipped), 1196)
+def wrms(pairs):
+    tot = sum(w for _, w in pairs)
+    return math.sqrt(sum(w * v * v for v, w in pairs) / tot)
+rs, rd = wrms(steady), wrms(dipped)
+check("time-weighted aggregate barely moves", abs(rs - rd) < 2, True)
+check("  steady weighted rms", round(rs), 2427)
+check("  dipped weighted rms", round(rd), 2426)
+check("but the floor differs by >1200 MHz",
+      min(v for v, _ in steady) - min(v for v, _ in dipped) > 1200, True)
 
 print("\n" + ("ALL PASS" if ok else "FAILURES PRESENT"))
 sys.exit(0 if ok else 1)

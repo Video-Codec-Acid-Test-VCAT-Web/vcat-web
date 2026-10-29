@@ -978,3 +978,48 @@ html, body {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+
+/* Time zoom − / + under each chart; − is disabled when zoomed all the way out. */
+.chart-zoom {
+  flex: 0 0 auto;
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+.chart-zoom button {
+  width: 22px;
+  height: 20px;
+  padding: 0;
+  line-height: 18px;
+  font-size: 14px;
+  background: #333;
+  color: #ddd;
+  border: 1px solid #555;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.chart-zoom button:hover:not(:disabled) {
+  border-color: #0a7;
+  color: #fff;
+}
+
+.chart-zoom button:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+.chart-zoom-span {
+  min-width: 28px;
+  text-align: center;
+  color: #0a7;
+  font-family: monospace;
+  font-size: 12px;
+}
+
+.chart-wrapper.thumb .chart-zoom {
+  display: none;
+}

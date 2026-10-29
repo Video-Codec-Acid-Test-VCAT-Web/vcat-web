@@ -414,6 +414,7 @@ def _write_metric_block(
     rows: List[List[Any]],
     info_rows: List[List[Any]] = None,
     chart_caption: str = None,
+    report_title: str = None,
 ) -> int:
     """Write one heading + table + chart starting at `start_row`.
 
@@ -422,10 +423,16 @@ def _write_metric_block(
     """
     from openpyxl.chart import LineChart, Reference
 
-    title = ws.cell(row=start_row, column=1, value=f"{metric} — per-hour comparison")
+    row_at = start_row
+    if report_title and start_row == 1:
+        banner = ws.cell(row=row_at, column=1, value=report_title)
+        banner.font = Font(bold=True, size=14)
+        row_at += 1
+
+    title = ws.cell(row=row_at, column=1, value=f"{metric} — per-hour comparison")
     title.font = Font(bold=True, size=13)
 
-    row_at = start_row + 2
+    row_at += 2
     for label, *values in info_rows or []:
         cell = ws.cell(row=row_at, column=1, value=label)
         cell.font = Font(bold=True)
@@ -450,7 +457,11 @@ def _write_metric_block(
 
     if len(rows) >= 2:
         chart = LineChart()
-        chart.title = f"{metric} by hour"
+        # With a report title, it heads the chart and the metric drops to a
+        # sub-title — so a chart lifted out of the workbook still says which
+        # report it came from.
+        chart.title = (_axis_title_lines([report_title, f"{metric} by hour"])
+                       if report_title else f"{metric} by hour")
         chart.y_axis.title = unit or metric
         # The f_rms figures ride along in the x-axis caption so they are visible
         # in the chart itself, in the empty strip beneath the plotted lines.
@@ -567,6 +578,7 @@ def _write_metric_sheet(
     series_labels: List[str],
     info_rows: List[List[Any]] = None,
     rms: Dict[str, Any] = None,
+    report_title: str = None,
 ) -> None:
     """One topic per sheet, stacked top to bottom: each block is a heading, a
     chartable per-hour table and its line chart. The run-description block is
@@ -585,6 +597,7 @@ def _write_metric_sheet(
             block.get("rows") or [],
             info_rows if i == 0 else None,
             caption,
+            report_title,
         )
 
     if rms:
@@ -653,6 +666,7 @@ def write_comparison_workbook(
     info_rows: List[List[Any]] = None,
     raw_sheets: List[Dict[str, Any]] = None,
     rms_blocks: Dict[str, Any] = None,
+    report_title: str = None,
 ) -> str:
     """Write one per-hour comparison sheet per metric, each ready to chart.
 
@@ -675,7 +689,7 @@ def write_comparison_workbook(
         ws = cast(Worksheet, wb.active) if i == 0 else wb.create_sheet()
         ws.title = _safe_sheet_title(title, i)
         _write_metric_sheet(ws, blocks, series_labels, info_rows,
-                            (rms_blocks or {}).get(title))
+                            (rms_blocks or {}).get(title), report_title)
 
     # One sheet per source log, after the charts: the summary tables resample to
     # the hour, so the raw rows are the only way back to the underlying samples.

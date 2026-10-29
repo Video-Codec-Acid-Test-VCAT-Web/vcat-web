@@ -1578,6 +1578,40 @@ def api_device_files(session_id, device_id, path):
         return jsonify({"error": "Failed to list playlist files"}), 500
 
 
+@app.route("/api/device/test_summary", methods=["GET"])
+@require_valid_session_device_and_path
+def api_device_test_summary(session_id, device_id, path):
+    """Read test_summary.json out of a device's test_results folder.
+
+    The app writes one entry per log — codec, decoder, duration, drops — which is
+    enough to describe a run without opening it. Absent on devices running an
+    older build, so a 404 here is ordinary and the caller falls back to listing
+    file names.
+    """
+    try:
+        out = subprocess.run(
+            ["adb", "-s", device_id, "exec-out", f"cat '{path}' 2>/dev/null"],
+            capture_output=True,
+        ).stdout
+        if not out.strip():
+            return jsonify({"status": "error", "message": "No summary on device"}), 404
+        data = json.loads(out.decode("utf-8", errors="replace"))
+    except json.JSONDecodeError as e:
+        logger.warning(f"test_summary.json is not valid JSON: {e}")
+        return jsonify({"status": "error", "message": f"Malformed summary: {e}"}), 422
+    except Exception as e:
+        logger.warning(f"test_summary read failed: {e}")
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+    # Tolerate either a bare list or an object wrapping one.
+    if isinstance(data, dict):
+        data = next((v for v in data.values() if isinstance(v, list)), [])
+    if not isinstance(data, list):
+        return jsonify({"status": "error", "message": "Unexpected summary shape"}), 422
+
+    return jsonify({"status": "ok", "entries": data})
+
+
 @app.route("/api/device/test_results_files", methods=["GET"])
 @require_valid_session_device_and_path
 def api_device_test_results_files(session_id, device_id, path):
@@ -2377,7 +2411,36 @@ RMS_MIN_HEADER = 3004
 # The clip-relative columns (test.duration / test.duration_ms) reset at every new
 # video, so they cannot carry the time axis. Elapsed time comes from the timestamp
 # delta, the way the reader derives it.
+#
+# CAVEAT: those deltas are wall-clock, used here as a proxy for per-core residency.
+# The two diverge when a CPU hotplugs offline mid-interval — residency then
+# accumulates over fewer cores than wall time implies, so a cluster with cores
+# parked reads as having spent more time at its last-seen clock than it did.
+# vcat-d does not currently export a residency denominator. If exact weighting
+# matters, ask the vcat-d side for that column rather than inferring it here.
 _RMS_TIME_COL = "test.timestamp"
+
+
+def _weighted_percentile(pairs, pct: float):
+    """Percentile over (value, weight) pairs, weighted by residency.
+
+    Weighted rather than a plain sample percentile for the same reason f_rms is
+    weighted: samples are not evenly spaced, so counting them equally lets a burst
+    of closely-spaced readings outvote a long steady stretch.
+    """
+    if not pairs:
+        return None
+    ordered = sorted(pairs)
+    total = sum(w for _, w in ordered)
+    if total <= 0:
+        return None
+    target = total * (pct / 100.0)
+    run = 0.0
+    for value, weight in ordered:
+        run += weight
+        if run >= target:
+            return value
+    return ordered[-1][0]
 
 
 def _rms(values) -> float:
@@ -2488,17 +2551,30 @@ def _cluster_rms(path: str, cluster: str, window=None):
         return None
 
     per_core, per_core_ratio = {}, []
+    # Every (clock, seconds-it-held) pair across the cluster, for the distribution.
+    # Two runs can share an f_rms and a median and still behave very differently —
+    # the low percentiles and the minimum are what separate them, because that is
+    # where throttling and stalls show up.
+    spread = []
     for cid in ids:
         num = sum(w * (f.get(cid, 0.0) ** 2) for w, (_, f) in zip(weights, kept))
         core_rms = math.sqrt(num / total)
         per_core[cid] = core_rms
         if max_of.get(cid):
             per_core_ratio.append(core_rms / max_of[cid])
+        for w, (_, f) in zip(weights, kept):
+            v = f.get(cid)
+            if v is not None and w > 0:
+                spread.append((v, w))
 
     return {
         "f_rms": _rms(per_core.values()),
         "pct_of_max": _rms(per_core_ratio) * 100.0 if per_core_ratio else None,
         "per_core": per_core,
+        "p5": _weighted_percentile(spread, 5),
+        "p50": _weighted_percentile(spread, 50),
+        "p95": _weighted_percentile(spread, 95),
+        "min": min((v for v, _ in spread), default=None),
         "weighted_hours": total / 3600.0,
         "window": (
             f"{int(start_s or 0)}-{int(end_s)} min" if end_s else
@@ -2536,6 +2612,10 @@ def _rms_block(session_id, raw_sources, cluster, window=None):
         rows.append(row(f"f_rms cpu{cid} (MHz)",
                         lambda r, c=cid: None if c not in r["per_core"]
                         else round(r["per_core"][c])))
+    rows.append(row("p95 (MHz)", lambda r: None if r["p95"] is None else round(r["p95"])))
+    rows.append(row("p50 (MHz)", lambda r: None if r["p50"] is None else round(r["p50"])))
+    rows.append(row("p5 (MHz)", lambda r: None if r["p5"] is None else round(r["p5"])))
+    rows.append(row("min (MHz)", lambda r: None if r["min"] is None else round(r["min"])))
     rows.append(row("Scoring window", lambda r: r["window"]))
     rows.append(row("Weighted duration (h)", lambda r: round(r["weighted_hours"], 2)))
 
@@ -2634,6 +2714,7 @@ def api_comparison_workbook(session_id):
                     _rms_block(session_id, body.get("raw_sources"), "small",
                                body.get("rms_window")),
             },
+            str(body.get("report_title") or "").strip() or None,
         )
         name_root = re.sub(r"[^A-Za-z0-9._-]", "_", str(body.get("name") or "comparison"))
         return send_file(

@@ -1329,12 +1329,17 @@ function clusterFrequencyRms(freq, keys) {
     : (times[i + 1] - times[i - 1]) / 2);
 
   const perCore = [];
+  let lowest = null;
   for (const key of keys) {
     let num = 0, den = 0;
     freq.forEach((p, i) => {
       const v = p.frequencies[key];
       const w = Math.max(0, weights[i]);
-      if (typeof v === "number" && w > 0) { num += w * v * v; den += w; }
+      if (typeof v === "number" && w > 0) {
+        num += w * v * v;
+        den += w;
+        if (lowest === null || v < lowest) lowest = v;
+      }
     });
     if (den > 0) perCore.push({ label: coreLabelFor(key), value: Math.sqrt(num / den) });
   }
@@ -1342,8 +1347,13 @@ function clusterFrequencyRms(freq, keys) {
 
   // Square, average, square-root again — the cluster figure is the RMS of the
   // per-core RMS values, never their arithmetic mean.
+  //
+  // The minimum rides along because the aggregate hides it: two runs can share an
+  // f_rms and a median and still differ materially, and the floor is where that
+  // shows. The full percentile spread is in the workbook, which has room for it.
   return {
     perCore,
+    min: lowest,
     total: Math.sqrt(
       perCore.reduce((a, c) => a + c.value * c.value, 0) / perCore.length),
   };
@@ -1361,10 +1371,12 @@ function setFreqFootnote(canvas, rms) {
   if (!el) {
     el = document.createElement("div");
     el.className = "chart-footnote";
-    wrapper.appendChild(el);
+    // Above the zoom buttons, which stay the last row of the card.
+    wrapper.insertBefore(el, wrapper.querySelector(".chart-zoom"));
   }
   const cores = rms.perCore.map(c => Math.round(c.value)).join(", ");
-  el.textContent = `f_rms ${Math.round(rms.total)} (${cores})`;
+  const floor = rms.min === null ? "" : `  min ${Math.round(rms.min)}`;
+  el.textContent = `f_rms ${Math.round(rms.total)} (${cores})${floor}`;
 }
 
 function drawFreqChart(tabId, chartKey, canvasSuffix, keys, coreKeys, freq, labels, stepSize) {
@@ -1646,10 +1658,14 @@ function chartOptions(yLabel, latestTime, stepSize) {
         title: { display: true, text: 'Elapsed Time (hh:mm)' },
         ticks: {
           stepSize,
-          callback: (value) => {
+          // `this` is the scale. Zoomed in to a few minutes, hh:mm would repeat
+          // the same label on every tick, so seconds are added.
+          callback: function (value) {
             const h = Math.floor(value / 3600);
             const m = Math.floor((value % 3600) / 60);
-            return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+            const hm = `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+            if (this.max - this.min > 900) return hm;
+            return `${hm}:${String(Math.floor(value % 60)).padStart(2, '0')}`;
           }
         }
       },
@@ -1683,6 +1699,208 @@ function chartOptions(yLabel, latestTime, stepSize) {
     }
   };
 }
+
+// ---- Time zoom: − / + under every time-axis chart ----
+// Each + halves the visible time window around its centre; dragging the chart
+// pans it, double-click resets. The window is imposed on the scale after
+// Chart.js has worked out the full range, so the chart's options — which the
+// pollers, the exports and the comparison toggle all read and rewrite — are
+// never touched, and a poll arriving mid-zoom doesn't knock the view out.
+const ZOOM_MIN_SPAN = 30; // seconds; closer than this there's nothing to see
+const ZOOM_TICK_STEPS = [1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600, 7200];
+
+function zoomTickStep(span) {
+  return ZOOM_TICK_STEPS.find(s => span / s <= 8) || 7200 * Math.ceil(span / 8 / 7200);
+}
+
+function formatZoomSpan(seconds) {
+  const s = Math.round(seconds);
+  if (s < 120) return `${s}s`;
+  if (s < 7200) return `${Math.round(s / 60)}m`;
+  return `${(s / 3600).toFixed(1).replace(/\.0$/, "")}h`;
+}
+
+// Move the window to [lo, hi], clamped inside the full range. A window as wide
+// as the full range is "zoomed out", which hands the axis back to Chart.js.
+function setChartZoom(chart, lo, hi) {
+  const z = chart.$zoom;
+  if (!z || !z.full) return;
+  const [fLo, fHi] = z.full;
+  const fullSpan = fHi - fLo;
+  let span = hi - lo;
+  if (!(fullSpan > 0) || span >= fullSpan - 1e-6) {
+    z.lo = z.hi = null;
+  } else {
+    span = Math.max(span, Math.min(ZOOM_MIN_SPAN, fullSpan));
+    lo = Math.min(Math.max(lo, fLo), fHi - span);
+    z.lo = lo;
+    z.hi = lo + span;
+  }
+  chart.update("none");
+}
+
+// Zoom about the data in view, not the middle of the axis. They differ when
+// the axis runs past the data — a short run aligned to a long one in a
+// comparison — and zooming on the empty part blanks the chart while the axis
+// still spans more time than the run did, which reads as zooming out.
+function zoomChart(chart, factor) {
+  const z = chart.$zoom;
+  if (!z || !z.full) return;
+  const lo = z.lo ?? z.full[0];
+  const hi = z.hi ?? z.full[1];
+  let mid = (lo + hi) / 2;
+  if (z.data) {
+    const a = Math.max(lo, z.data[0]);
+    const b = Math.min(hi, z.data[1]);
+    if (a < b) mid = (a + b) / 2;
+  }
+  const half = ((hi - lo) * factor) / 2;
+  setChartZoom(chart, mid - half, mid + half);
+}
+
+// Back to the full view without an update; the caller redraws.
+function clearChartZoom(chart) {
+  if (chart.$zoom) chart.$zoom.lo = chart.$zoom.hi = null;
+}
+
+// First and last x actually plotted, across the visible series.
+function chartDataExtent(chart) {
+  let lo = Infinity, hi = -Infinity;
+  chart.getSortedVisibleDatasetMetas().forEach(meta => {
+    (meta._parsed || []).forEach(p => {
+      if (!p || !Number.isFinite(p.x) || !Number.isFinite(p.y)) return;
+      if (p.x < lo) lo = p.x;
+      if (p.x > hi) hi = p.x;
+    });
+  });
+  return lo < hi ? [lo, hi] : null;
+}
+
+function refreshZoomControls(chart) {
+  const z = chart.$zoom;
+  if (!z || !z.bar) return;
+  const zoomed = z.lo !== null;
+  const span = zoomed ? z.hi - z.lo : z.full ? z.full[1] - z.full[0] : 0;
+  z.minus.disabled = !zoomed;
+  z.plus.disabled = !(span > ZOOM_MIN_SPAN);
+  z.label.textContent = zoomed ? formatZoomSpan(span) : "";
+  chart.canvas.style.cursor = z.dragging ? "grabbing" : zoomed ? "grab" : "";
+}
+
+function addZoomControls(chart) {
+  const z = chart.$zoom;
+  const canvas = chart.canvas;
+  const wrapper = canvas.closest(".chart-wrapper");
+  if (!wrapper) return;
+  wrapper.querySelector(".chart-zoom")?.remove(); // left by a chart since rebuilt
+
+  const bar = document.createElement("div");
+  bar.className = "chart-zoom";
+  const mk = (text, title, factor) => {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.textContent = text;
+    b.title = title;
+    b.disabled = true;
+    b.addEventListener("click", () => zoomChart(chart, factor));
+    return b;
+  };
+  z.minus = mk("−", "Zoom out", 2);
+  z.plus = mk("+", "Zoom in (drag the chart to pan, double-click to reset)", 0.5);
+  z.label = document.createElement("span");
+  z.label.className = "chart-zoom-span";
+  bar.append(z.minus, z.label, z.plus);
+  wrapper.appendChild(bar);
+  z.bar = bar;
+
+  // Canvases outlive their charts (a rebuild reuses the element), so the
+  // listeners are kept to be taken off again in afterDestroy.
+  let drag = null;
+  const handlers = {
+    pointerdown: e => {
+      if (z.lo === null || e.button !== 0) return;
+      drag = { x: e.clientX, lo: z.lo, hi: z.hi };
+      z.dragging = true;
+      canvas.setPointerCapture(e.pointerId);
+      canvas.style.cursor = "grabbing";
+    },
+    pointermove: e => {
+      if (!drag) return;
+      const area = chart.chartArea;
+      const width = area ? area.right - area.left : canvas.clientWidth;
+      if (!(width > 0)) return;
+      const dv = ((e.clientX - drag.x) / width) * (drag.hi - drag.lo);
+      setChartZoom(chart, drag.lo - dv, drag.hi - dv);
+    },
+    pointerup: () => {
+      drag = null;
+      z.dragging = false;
+      refreshZoomControls(chart);
+    },
+    dblclick: () => {
+      if (z.lo !== null && z.full) setChartZoom(chart, z.full[0], z.full[1]);
+    },
+  };
+  handlers.pointercancel = handlers.pointerup;
+  Object.entries(handlers).forEach(([ev, fn]) => canvas.addEventListener(ev, fn));
+  z.detach = () => {
+    Object.entries(handlers).forEach(([ev, fn]) => canvas.removeEventListener(ev, fn));
+    bar.remove();
+    canvas.style.cursor = "";
+  };
+}
+
+const chartZoomPlugin = {
+  id: "vcatTimeZoom",
+  afterInit(chart) {
+    if (chart.options.scales?.x?.type !== "linear") return;
+    chart.$zoom = { lo: null, hi: null, full: null };
+    addZoomControls(chart);
+  },
+  // The natural (unzoomed) range, as Chart.js resolved it from the data and
+  // the options. Recomputed on every update, so it tracks a growing live run.
+  afterDataLimits(chart, { scale }) {
+    const z = chart.$zoom;
+    if (!z || scale.id !== "x") return;
+    const prev = z.full;
+    z.full = [scale.min, scale.max];
+    z.data = chartDataExtent(chart);
+    if (z.lo === null || !prev) return;
+    const span = z.hi - z.lo;
+    if (span >= z.full[1] - z.full[0]) {
+      z.lo = z.hi = null; // data shrank (reset / new file) — nothing left to zoom
+    } else if (z.hi >= prev[1] - 1e-6) {
+      // Window was on the newest data: keep following it as the run grows.
+      z.hi = z.full[1];
+      z.lo = z.hi - span;
+    } else {
+      z.lo = Math.min(Math.max(z.lo, z.full[0]), z.full[1] - span);
+      z.hi = z.lo + span;
+    }
+  },
+  // Swap in the zoom window and ticks spaced for it (the options' stepSize is
+  // sized for the whole run, which would leave a zoomed axis bare).
+  afterBuildTicks(chart, { scale }) {
+    const z = chart.$zoom;
+    if (!z || scale.id !== "x" || z.lo === null) return;
+    const step = zoomTickStep(z.hi - z.lo);
+    const ticks = [];
+    for (let v = Math.ceil(z.lo / step) * step; v <= z.hi + 1e-9; v += step) {
+      ticks.push({ value: v });
+    }
+    scale.ticks = ticks;
+    scale.min = z.lo;
+    scale.max = z.hi;
+  },
+  afterUpdate(chart) {
+    refreshZoomControls(chart);
+  },
+  afterDestroy(chart) {
+    chart.$zoom?.detach?.();
+  },
+};
+
+if (typeof Chart !== "undefined") Chart.register(chartZoomPlugin);
 
 const API_RUN_CONFIG = '/api/device/run_config';
 // Modal control for Run Config
@@ -3006,8 +3224,9 @@ async function pickDeviceFile(app) {
   }
 
   let files = [];
+  const resultsDir = `${root}/test_results`;
   try {
-    const path = `${root}/test_results/*.csv`;
+    const path = `${resultsDir}/*.csv`;
     const res = await fetch(
       `/api/device/test_results_files?session=${session_token}&device=${deviceId}&path=${encodeURIComponent(path)}`
     );
@@ -3015,6 +3234,10 @@ async function pickDeviceFile(app) {
   } catch (err) {
     console.error("Compare: device file list failed:", err);
   }
+
+  // Same summary the Test Results tab uses: picking which run to compare against
+  // is exactly where a file name tells you least.
+  const summary = await fetchTestSummary(deviceId, resultsDir);
   if (!files.length) {
     alert(`No ${appLabel(app)} test-result files found on ${deviceId}.`);
     return null;
@@ -3030,17 +3253,39 @@ async function pickDeviceFile(app) {
     };
     _deviceComparePick = finish;
 
+    const header = document.querySelector("#compare-picker-modal thead tr");
+    const haveSummary = Object.keys(summary).length > 0;
+    if (header) {
+      header.innerHTML = haveSummary
+        ? "<th>Run</th><th class='size-col'>Size</th>"
+        : "<th>Name</th><th>Date</th><th class='size-col'>Size</th>";
+    }
+
     body.innerHTML = "";
     files.forEach(f => {
       const tr = document.createElement("tr");
-      const name = document.createElement("td");
-      name.textContent = f.filename;
-      const date = document.createElement("td");
-      date.textContent = f.date || "";
       const size = document.createElement("td");
       size.className = "size-col";
       size.textContent = fmtFileSize(f.size);
-      tr.append(name, date, size);
+
+      const entry = haveSummary ? summary[f.filename] : null;
+      if (haveSummary) {
+        const run = document.createElement("td");
+        // A log the summary doesn't cover still has to be pickable.
+        run.textContent = entry ? summaryLine(entry) : f.filename;
+        run.title = f.filename;
+        tr.append(run, size);
+      } else {
+        const name = document.createElement("td");
+        name.textContent = f.filename;
+        const date = document.createElement("td");
+        date.textContent = f.date || "";
+        tr.append(name, date, size);
+      }
+
+      // The picked column keeps the file name as its label: that label becomes
+      // the comparison tab's id and its column heading, where a 44-character
+      // summary line would just be truncated.
       tr.onclick = () => finish({ app, kind: "device", path: f.path, label: f.filename });
       body.appendChild(tr);
     });
@@ -3326,6 +3571,12 @@ function applyCompareAlignment(sides, on) {
     const pair = sides.map(s => (chartsByTabId[s] || {})[key]).filter(Boolean);
     if (pair.length < 2) return;
 
+    // The shared range is read off the drawn axes, so any zoom comes off first
+    // (it's reset anyway — the range it was a window into is about to change).
+    pair.forEach(c => {
+      if (c.$zoom?.lo != null) { clearChartZoom(c); c.update("none"); }
+    });
+
     // Remember each chart's own scaling once, so the toggle is reversible.
     pair.forEach(c => {
       c._cmpOwnScale ||= {
@@ -3475,6 +3726,15 @@ async function openCompareTab(sources, cached = []) {
 // comparison panel — real canvases with hover, legend toggling and zoom, not a
 // picture of them. Works for a single log as well as a comparison; the layout is
 // the same one row per metric, one column per log.
+
+// The projects behind an exported report: the benchmark that produced the logs,
+// and this tool that rendered them. A report travels away from here, so it should
+// say where it came from and who owns the marks.
+// vcat-ai is deliberately named but not linked — it is not public yet, and its
+// presence in a report is the only trace of it.
+const VCAT_D_URL = "https://github.com/Video-Codec-Acid-Test-VCAT/vcat-d";
+const VCAT_WEB_URL = "https://github.com/Video-Codec-Acid-Test-VCAT-Web/vcat-web";
+const RONCATECH_URL = "https://roncatech.com";
 
 // Points kept per series. Far more than any screen can resolve, and ~0.8 MB of
 // JSON per log against ~14 MB for every raw sample.
@@ -3635,11 +3895,13 @@ async function exportTabHtml(tabId) {
     : `VCAT results — ${sources[0].label}`;
 
   const stem = reportFilenameStem(ctx.app, data);
-  const filename = promptForFilename(stem, "html");
-  if (!filename) return;
+  const opts = await promptExportOptions(stem, "html", defaultReportTitle(data));
+  if (!opts) return;
+  const { filename, title: reportTitle } = opts;
 
   const details = data.map(exportTestDetailsCell);
-  const html = buildExportHtml({ title, columns, rows, details, css, chartLib, kept, total });
+  const html = buildExportHtml({ title, columns, rows, details, css, chartLib,
+                                 kept, total, app: ctx.app, reportTitle });
   downloadBlob(new Blob([html], { type: "text/html;charset=utf-8" }), filename);
 }
 
@@ -3691,7 +3953,7 @@ function exportTestDetailsCell(payload) {
 // Assemble the document. The panel's own stylesheet is inlined and reused, so the
 // export inherits the real look rather than a hand-rolled imitation; a short
 // override block replaces the parts that assume the live app shell.
-function buildExportHtml({ title, columns, rows, details, css, chartLib, kept, total }) {
+function buildExportHtml({ title, columns, rows, details, css, chartLib, kept, total, app, reportTitle }) {
   const cols = columns.length;
   const headCells = columns.map(c => `
       <div class="cmp-col-head">
@@ -3703,11 +3965,13 @@ function buildExportHtml({ title, columns, rows, details, css, chartLib, kept, t
       </div>`).join("");
 
   const cells = [...(details || [])];
+  rows.forEach(row => row.charts.forEach(chart => { if (chart) chart.metric = row.title; }));
   rows.forEach((row, r) => row.charts.forEach((chart, c) => {
     const caption = chart && chart.footnote
       ? `<div class="chart-footnote">${htmlEscape(chart.footnote)}</div>` : "";
+    const heading = reportTitle ? "" : `<h3>${htmlEscape(row.title)}</h3>`;
     cells.push(chart
-      ? `<div class="chart-wrapper"><h3>${htmlEscape(row.title)}</h3><canvas id="ch-${r}-${c}"></canvas>${caption}</div>`
+      ? `<div class="chart-wrapper">${heading}<canvas id="ch-${r}-${c}"></canvas>${caption}</div>`
       : `<div class="chart-wrapper cmp-empty">${htmlEscape(row.title)} — not recorded in this log</div>`);
   }));
 
@@ -3726,6 +3990,10 @@ function buildExportHtml({ title, columns, rows, details, css, chartLib, kept, t
          font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
   .export-head { padding: 14px 18px 8px; border-bottom: 1px solid #444; }
   .export-head h1 { margin: 0 0 4px; font-size: 17px; }
+  .export-head .credits { margin-bottom: 2px; font-size: 13px; color: #ccc; }
+  .export-head .trademark { margin-bottom: 4px; font-size: 11px; color: #777; }
+  .export-head a { color: #0a7; text-decoration: none; }
+  .export-head a:hover { text-decoration: underline; }
   .export-head .sub { color: #888; font-size: 12px; }
   .compare-scroll { height: auto; overflow: visible; padding-bottom: 30px; }
   .compare-heads { grid-template-columns: repeat(${cols}, minmax(420px, 1fr)); }
@@ -3745,7 +4013,19 @@ function buildExportHtml({ title, columns, rows, details, css, chartLib, kept, t
 </style>
 </head><body>
 <div class="export-head">
-  <h1>${htmlEscape(title)}</h1>
+  <h1>${htmlEscape(reportTitle || title)}</h1>
+  ${reportTitle ? `<div class="sub">${htmlEscape(title)}</div>` : ""}
+  <div class="credits">
+    Benchmarks run using ${app === "vcat_ai"
+      ? "<strong>vcat-ai</strong>"
+      : `<a href="${VCAT_D_URL}" target="_blank" rel="noopener noreferrer">vcat-d\u2122</a>`} —
+    report generated using
+    <a href="${VCAT_WEB_URL}" target="_blank" rel="noopener noreferrer">vcat-web\u2122</a>
+  </div>
+  <div class="trademark">
+    ${app === "vcat_ai" ? "vcat-web\u2122 is a trademark" : "vcat-d\u2122 and vcat-web\u2122 are trademarks"}
+    of <a href="${RONCATECH_URL}" target="_blank" rel="noopener noreferrer">RoncaTech LLC</a>
+  </div>
   <div class="sub">Exported ${htmlEscape(new Date().toLocaleString())} —
     ${pct}% of samples retained (${kept.toLocaleString()} of ${total.toLocaleString()} points).
     Hover for exact values; click a legend entry to hide a series.</div>
@@ -3757,6 +4037,7 @@ function buildExportHtml({ title, columns, rows, details, css, chartLib, kept, t
 <script>${chartLib}</script>
 <script>
 const ROWS = ${jsonForScript(payload)};
+const REPORT_TITLE = ${jsonForScript(reportTitle || "")};
 
 // Same formatters the panel uses, restated here because a tick callback is a
 // function and can't be carried across in JSON.
@@ -3790,6 +4071,14 @@ ROWS.forEach((row, r) => row.forEach((spec, c) => {
       elements: { point: { radius: 0 } },
       interaction: { mode: "index", intersect: false },
       plugins: {
+        title: REPORT_TITLE
+          ? { display: true, text: REPORT_TITLE, color: "#eee",
+              font: { size: 14, weight: "bold" } }
+          : { display: false },
+        subtitle: REPORT_TITLE && spec.metric
+          ? { display: true, text: spec.metric, color: "#aaa",
+              font: { size: 12 }, padding: { bottom: 6 } }
+          : { display: false },
         legend: { position: "bottom", labels: { color: "#ddd", boxWidth: 12, padding: 10 } },
         tooltip: { callbacks: { title: items => {
           if (!items || !items.length) return "";
@@ -3857,21 +4146,104 @@ function reportFilenameStem(app, payloads) {
   return [prefix, ...(codecs.length ? codecs : ["unknown"]), stamp].join("_");
 }
 
-// Ask what to call the file, offering the generated name as the default. Returns
-// null when the user cancels, so the caller abandons the export entirely rather
-// than writing something they didn't ask for.
-function promptForFilename(defaultStem, ext) {
-  const suggested = `${defaultStem}.${ext}`;
-  const answer = window.prompt(`Save ${ext.toUpperCase()} as:`, suggested);
-  if (answer === null) return null;
+// A report title built from what is actually being compared, e.g.
+// "AV1 vs. AV2 vs. VVC (1920x1080 30fps)". Pre-filled into the dialog as an
+// editable value rather than offered as placeholder text, which looks like a
+// default but leaves the field empty if you don't retype it.
+function defaultReportTitle(payloads) {
+  const vids = payloads.map(d => ((d && d.test_details) || {}).currentTestVideo || {});
 
-  // Keep it a bare file name: a download can't choose a directory, and these
-  // characters are illegal in a file name on Windows (and confusing elsewhere).
-  let name = (answer.trim() || suggested)
+  const codecs = [];
+  vids.forEach(v => {
+    const c = codecLabel(v.videoCodec);
+    if (c && !codecs.includes(c)) codecs.push(c);
+  });
+
+  // Only describe the format when every run shares one — "1920x1080 30fps" is a
+  // claim about the comparison, and it is false the moment two runs differ.
+  const uniq = key => [...new Set(vids.map(key).filter(Boolean))];
+  const res = uniq(v => v.resolution);
+  const fps = uniq(v => (Number(v.framerate) > 0 ? `${Math.round(v.framerate)}fps` : ""));
+  const format = (res.length === 1 ? res : []).concat(fps.length === 1 ? fps : []).join(" ");
+
+  const subject = codecs.length ? codecs.join(" vs. ") : "VCAT results";
+  return format ? `${subject} (${format})` : subject;
+}
+
+// Keep a download's name a bare file name: it can't choose a directory, and
+// these characters are illegal on Windows (and confusing elsewhere).
+function sanitizeFilename(answer, suggested, ext) {
+  let name = (String(answer || "").trim() || suggested)
     .replace(/^.*[\\/]/, "")
     .replace(/[<>:"|?*\x00-\x1f]/g, "_");
   if (!name.toLowerCase().endsWith(`.${ext}`)) name += `.${ext}`;
   return name;
+}
+
+let _exportOptionsResolve = null;
+
+// Ask how to save: file name, plus a report title that heads every graph. Resolves
+// to null when cancelled, so the caller abandons the export rather than writing
+// something that wasn't asked for. Built as a dialog rather than a prompt() so
+// further options have somewhere to go.
+function promptExportOptions(defaultStem, ext, defaultTitle = "") {
+  const suggested = `${defaultStem}.${ext}`;
+  const modal = document.getElementById("export-options-modal");
+  const nameField = document.getElementById("export-filename");
+  const titleField = document.getElementById("export-title");
+
+  // No dialog in the page (an older cached index.html) — fall back rather than
+  // leaving the user with a button that does nothing.
+  if (!modal || !nameField || !titleField) {
+    const answer = window.prompt(`Save ${ext.toUpperCase()} as:`, suggested);
+    return Promise.resolve(
+      answer === null ? null
+        : { filename: sanitizeFilename(answer, suggested, ext), title: "" });
+  }
+
+  const heading = document.getElementById("export-options-heading");
+  if (heading) heading.textContent = `Save ${ext.toUpperCase()} report`;
+  nameField.value = suggested;
+  titleField.value = defaultTitle;
+
+  return new Promise(resolve => {
+    _exportOptionsResolve = (value) => {
+      _exportOptionsResolve = null;
+      modal.style.display = "none";
+      document.removeEventListener("keydown", onKey);
+      resolve(value);
+    };
+    const onKey = (e) => {
+      if (e.key === "Escape") _exportOptionsResolve(null);
+      if (e.key === "Enter" && e.target.tagName === "INPUT") confirmExportOptions();
+    };
+    document.addEventListener("keydown", onKey);
+
+    modal.style.display = "block";
+    nameField.focus();
+    nameField.select();
+    modal._ext = ext;
+    modal._suggested = suggested;
+  });
+}
+
+function confirmExportOptions() {
+  if (!_exportOptionsResolve) return;
+  const modal = document.getElementById("export-options-modal");
+  const title = (document.getElementById("export-title").value || "").trim();
+  _exportOptionsResolve({
+    filename: sanitizeFilename(
+      document.getElementById("export-filename").value, modal._suggested, modal._ext),
+    title,
+  });
+}
+
+function closeExportOptions() {
+  if (_exportOptionsResolve) _exportOptionsResolve(null);
+  else {
+    const modal = document.getElementById("export-options-modal");
+    if (modal) modal.style.display = "none";
+  }
 }
 
 function downloadBlob(blob, filename) {
@@ -4351,8 +4723,9 @@ async function exportTabSpreadsheet(tabId) {
 
   const labels = comparisonSeriesLabels(data);
   const stem = reportFilenameStem(ctx.app, data);
-  const filename = promptForFilename(stem, "xlsx");
-  if (!filename) return;
+  const opts = await promptExportOptions(stem, "xlsx", defaultReportTitle(data));
+  if (!opts) return;
+  const { filename, title: reportTitle } = opts;
   const infoRows = runFieldRows(sources, data);
 
   try {
@@ -4366,6 +4739,7 @@ async function exportTabSpreadsheet(tabId) {
           sheets,
           info_rows: infoRows,
           name: stem,
+          report_title: reportTitle,
           // Resolved and read server-side; the browser only names the files.
           raw_sources: sources.map(src => ({
             kind: src.kind,
@@ -4646,6 +5020,75 @@ async function loadPlaylistFiles() {
     });
 }
 
+// ---- Test Results: file names vs. summary lines --------------------------------
+// The app writes test_summary.json alongside the logs, describing each run. With
+// it, a row can say what the run actually was instead of just naming a file.
+// Devices on an older build have no summary, so the view falls back to names and
+// the toggle stays hidden.
+let resultsView = "summary";          // "summary" | "names"
+let testSummaryByFile = {};           // basename -> summary entry
+
+function setResultsView(view) {
+  resultsView = view === "names" ? "names" : "summary";
+  document.querySelectorAll("[data-results-view]").forEach(b =>
+    b.classList.toggle("active", b.dataset.resultsView === resultsView));
+  loadTestResults();
+}
+
+// "26/10/14 04:33:30" — local time, matching how the device's clock reads.
+function fmtSummaryStamp(ms) {
+  // No timestamp at all is better shown as nothing than as the 1970 epoch.
+  if (!Number(ms)) return "";
+  const d = new Date(Number(ms));
+  if (!Number.isFinite(d.getTime())) return "";
+  const p = v => String(v).padStart(2, "0");
+  return `${p(d.getFullYear() % 100)}/${p(d.getMonth() + 1)}/${p(d.getDate())} ` +
+         `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+}
+
+// "8h01m" for a long run, "12m30s" for a short one — a battery run is hours, a
+// single-clip check is minutes, and neither reads well in the other's units.
+function fmtSummaryDuration(seconds) {
+  const n = Math.max(0, Math.round(Number(seconds) || 0));
+  const p = v => String(v).padStart(2, "0");
+  if (n >= 3600) return `${Math.floor(n / 3600)}h${p(Math.floor((n % 3600) / 60))}m`;
+  if (n >= 60) return `${Math.floor(n / 60)}m${p(n % 60)}s`;
+  return `${n}s`;
+}
+
+// "26/10/14 04:33:30 8h01m VVC vcat-vvdec-3.2.0"
+function summaryLine(entry) {
+  if (!entry) return "";
+  return [
+    fmtSummaryStamp(entry.start_time_ms),
+    fmtSummaryDuration(entry.duration_sec),
+    codecLabel(entry.codec),
+    entry.decoder || "",
+  ].filter(Boolean).join(" ");
+}
+
+// Fetch the summary for a folder. Returns {} when the device hasn't got one,
+// which is the signal to fall back to file names.
+async function fetchTestSummary(deviceId, resultsDir) {
+  const path = `${resultsDir}/test_summary.json`;
+  try {
+    const res = await fetch(
+      `/api/device/test_summary?session=${session_token}&device=${deviceId}` +
+      `&path=${encodeURIComponent(path)}`);
+    if (!res.ok) return {};
+    const data = await res.json();
+    const byFile = {};
+    (data.entries || []).forEach(e => {
+      const name = String(e.file || "").replace(/^.*[\\/]/, "");
+      if (name) byFile[name] = e;
+    });
+    return byFile;
+  } catch (err) {
+    console.warn("test_summary unavailable:", err);
+    return {};
+  }
+}
+
 async function loadTestResults() {
   const deviceSelect = document.getElementById("device");
   const selectedDeviceId = deviceSelect?.value;
@@ -4661,13 +5104,29 @@ async function loadTestResults() {
     return;
   }
 
-  const path = `${root}/test_results/*.csv`;
+  const resultsDir = `${root}/test_results`;
+  const path = `${resultsDir}/*.csv`;
   const url = `/api/device/test_results_files?session=${session_token}&device=${selectedDeviceId}&path=${encodeURIComponent(path)}`;
+
+  testSummaryByFile = await fetchTestSummary(selectedDeviceId, resultsDir);
+  const haveSummary = Object.keys(testSummaryByFile).length > 0;
+
+  // No summary on this device: nothing to toggle between, so hide the control.
+  const toggle = document.getElementById("results-view-toggle");
+  if (toggle) toggle.style.display = haveSummary ? "" : "none";
+  const header = document.querySelector("#test-results-table thead tr");
+  const asSummary = haveSummary && resultsView === "summary";
+  if (header) {
+    header.innerHTML = asSummary
+      ? "<th>Run</th><th class='size-col'>Size</th>"
+      : "<th>Name</th><th>Date</th><th class='size-col'>Size</th>";
+  }
 
   fetch(url)
     .then(res => res.json())
     .then(files => {
-      renderTestResultRows(document.getElementById("test-results-body"), files);
+      renderTestResultRows(document.getElementById("test-results-body"), files,
+                           undefined, asSummary);
     })
     .catch(err => {
       console.error("Failed to load test results:", err);
@@ -4688,22 +5147,40 @@ function fmtFileSize(b) {
 
 // Render Test Results rows (Name / Date / Size) into a <tbody>, shared by
 // vcat-d and vcat-ai. Row click opens the Open/Download context menu.
-function renderTestResultRows(body, files, opener) {
+function renderTestResultRows(body, files, opener, asSummary = false) {
   if (!body) return;
   body.innerHTML = "";
   files.forEach(file => {
     const tr = document.createElement("tr");
     tr.dataset.path = file.path;
 
-    const nameTd = document.createElement("td");
-    nameTd.textContent = file.filename;
-    const dateTd = document.createElement("td");
-    dateTd.textContent = file.date || "";
     const sizeTd = document.createElement("td");
     sizeTd.className = "size-col";
     sizeTd.textContent = fmtFileSize(file.size);
 
-    tr.append(nameTd, dateTd, sizeTd);
+    const entry = asSummary ? testSummaryByFile[file.filename] : null;
+    if (entry) {
+      // One line describing the run. The file name stays as the tooltip, since
+      // it is still what you need when matching against an exported report.
+      const runTd = document.createElement("td");
+      runTd.textContent = summaryLine(entry);
+      runTd.title = file.filename;
+      tr.append(runTd, sizeTd);
+    } else {
+      const nameTd = document.createElement("td");
+      nameTd.textContent = file.filename;
+      if (asSummary) {
+        // Summary exists but says nothing about this file — a log written after
+        // it, most likely. Showing the name beats showing a blank row.
+        nameTd.colSpan = 1;
+        tr.append(nameTd, sizeTd);
+      } else {
+        const dateTd = document.createElement("td");
+        dateTd.textContent = file.date || "";
+        tr.append(nameTd, dateTd, sizeTd);
+      }
+    }
+
     tr.onclick = (event) => openTestResultMenu(event, file.path, opener);
     body.appendChild(tr);
   });

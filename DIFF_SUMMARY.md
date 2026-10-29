@@ -31,10 +31,15 @@ on the frame-drops graph; and (X) **device identity pinned** in the comparison h
 (AA) **f_rms** — a time-weighted frequency RMS under each CPU frequency chart, on the
 page and in the workbook; and (AB) **reopen an exported workbook** — its embedded raw
 sheets rebuild the session; and (AC) **export polish** — named output files, a reading
-order shared by page and report, labelled spreadsheet axes.
+order shared by page and report, labelled spreadsheet axes; and (AD) **chart time zoom** —
+− / + under every graph, drag to pan; and (AE) **report title & credits** — an export
+dialog with a title that heads every graph, and a provenance line in the HTML report; and
+(AF) **Test Results summary view** — one line per run from the device's
+`test_summary.json`; and (AG) **f_rms distribution** — weighted p5/p50/p95 and the minimum
+beside f_rms.
 (A/B → `4fa2a5b`; C → `237b96a`; D → `61898ff`; E → `038ea4a`; F → `233d5d3`;
 G → `72f3786` (+ `1acbfdb`); H → `5ff0c88`/`36cfcd3`; I → `072d296`; J → `d4a15aa`;
-K–Q → `3be5654`/`025ab30`/`13a6dca`; R–Z → `336a015`; AA–AC are the current change.)
+K–Q → `3be5654`/`025ab30`/`13a6dca`; R–Z → `336a015`; AA–AC → `18470b1`/`425b481`; AD–AG are the current change.)
 
 ---
 
@@ -861,6 +866,91 @@ reading-nearest-the-hour rule showed 0. Hours past a log's end stay blank, not 0
   width and anything appended below it rendered outside the card. The card is now a flex
   column and charts fill it.
 - **Frame drop colours**: ordinary drops orange, keyframe resyncs red.
+
+---
+
+## AD. Chart time zoom
+
+Every time-axis chart has **− [window] +** at the bottom right of its card. **+** halves the
+visible window, **−** doubles it, the label shows how much time is on screen (`31m`, `30s`).
+− is disabled when fully zoomed out, + at the 30 s floor. Dragging a zoomed chart pans it;
+double-click resets.
+
+### How it is applied (`static/main.js`, `static/style.css`)
+- One registered Chart.js plugin (`chartZoomPlugin`) — no per-chart wiring, so every
+  existing and future `new Chart(...)` with a linear x axis gets the controls.
+- The window is imposed **at the scale**, in `afterDataLimits` / `afterBuildTicks`, never in
+  `chart.options`. The pollers rewrite `options.scales.x.max` every update, and the exports
+  and the comparison toggle read it, so zoom living in options would either be knocked out
+  by the next poll or leak into a saved report. Exports therefore always carry the full
+  range; the PDF, being a picture of the canvas, shows what is on screen.
+- Ticks are regenerated for the window (the options' `stepSize` is sized for the whole run
+  and would leave a zoomed axis bare), and the x-axis labels gain seconds below a 15-minute
+  span, where `hh:mm` would repeat on every tick.
+- A window on the newest data **follows the live edge** as the run grows; one parked earlier
+  stays put.
+- Zoom centres on the **data in view**, not the middle of the axis. In an aligned comparison
+  the shorter run is stretched to the longer run's timeline; zooming on the empty part
+  blanked the chart while the axis still spanned more time than the run did, which read as
+  zooming *out*.
+- Toggling comparison alignment resets zoom first — it reads the drawn axis range, and a
+  zoomed one would become the shared scale.
+- Canvases outlive their charts (a rebuild reuses the element), so the plugin removes its
+  listeners and controls in `afterDestroy`. Hidden on focus-mode thumbnails.
+
+The HTML export still has zoom off (§ Z / § AC); this is page-only.
+
+---
+
+## AE. Report title and credits
+
+### Export dialog (`static/index.html`, `static/main.js`)
+`window.prompt()` for the file name is replaced by a small dialog: file name plus a **report
+title**, pre-filled from the runs (`VVC vs. AV1 (1920x1080 30fps)` — resolution and frame
+rate only when every run shares them, since otherwise the claim is false). The title is an
+editable value, not placeholder text, which would look like a default but submit empty.
+Falls back to `prompt()` if a cached `index.html` predates the dialog.
+
+### Where the title goes
+- **HTML report**: the page `<h1>` (the generated name drops to a sub-line), and each chart's
+  Chart.js title with the metric as its subtitle, replacing the card's `<h3>`.
+- **Workbook** (`vcat_telemetry_writer.py`): a banner row atop each sheet and the first line
+  of each chart title; `report_title` travels in the `comparison_workbook` request body.
+
+### Credits (HTML report)
+A line saying the benchmarks were run with vcat-d™ and the report generated with vcat-web™,
+linked to their repositories, and a trademark line naming RoncaTech LLC. vcat-ai is named
+but **not linked** — it is not public yet.
+
+---
+
+## AF. Test Results summary view
+
+vcat-d now writes `test_summary.json` beside its logs. New `GET /api/device/test_summary`
+(`vcat_telemetry.py`) reads it over `adb exec-out` and returns its entries; a bare list or an
+object wrapping one are both accepted. A 404 is ordinary — older builds have no summary.
+
+With a summary present, each Test Results row reads as one line —
+`26/10/14 04:33:30 8h01m VVC vcat-vvdec-3.2.0` — with the file name as its tooltip, and a
+**Details / Names** toggle switches back to file names. Without one the toggle stays
+hidden and the list is unchanged. **Test Results is now the default sub-tab**, ahead of
+Playlists.
+
+---
+
+## AG. f_rms distribution: percentiles and minimum
+
+Two runs can share an f_rms and a median and still behave very differently — throttling and
+stalls show up in the low tail. `_cluster_rms()` now also returns time-weighted **p5, p50,
+p95** and the **minimum** over every (clock, seconds held) pair in the cluster, and the
+workbook's f_rms block gains those rows. Weighted for the same reason f_rms is: samples are
+unevenly spaced, so counting them equally lets a burst of close readings outvote a long
+steady stretch (`_weighted_percentile`). The on-page caption appends `min`.
+
+`tests_rms.py` covers the percentiles, including the discriminating case: equal f_rms and
+median, minimums 1200+ MHz apart. A comment at `_RMS_TIME_COL` records the caveat that
+wall-clock deltas stand in for per-core residency, which diverges when a core hotplugs
+offline.
 
 ---
 

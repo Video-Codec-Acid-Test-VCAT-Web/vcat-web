@@ -97,16 +97,22 @@
                     </div>
                     <!--display-->
                     <div id="device-subtabs" style="margin-top: 12px; width: 100%;">
-                        <div style="display: flex; gap: 6px;">
-                            <button id="playlists-subtab-btn" class="subtab-btn active" onclick="showDeviceSubTab('playlists')">Playlists</button>
-                            <button id="test-results-subtab-btn" class="subtab-btn" onclick="showDeviceSubTab('test-results')">Test Results</button>
+                        <div style="display: flex; gap: 6px; align-items: center;">
+                            <button id="test-results-subtab-btn" class="subtab-btn active" onclick="showDeviceSubTab('test-results')">Test Results</button>
+                            <button id="playlists-subtab-btn" class="subtab-btn" onclick="showDeviceSubTab('playlists')">Playlists</button>
+                            <span id="results-view-toggle" style="margin-left: auto; display: none;">
+                                <button type="button" class="subtab-btn active" data-results-view="summary"
+                                        onclick="setResultsView('summary')" title="One line per run: date, duration, codec, decoder">Details</button>
+                                <button type="button" class="subtab-btn" data-results-view="names"
+                                        onclick="setResultsView('names')" title="Show file names">Names</button>
+                            </span>
                         </div>
-                        <div id="playlists-subtab" class="subtab-panel">
+                        <div id="playlists-subtab" class="subtab-panel" style="display: none;">
                             <div class="list-scroll" style="overflow-y: auto; padding: 10px;">
                                 <ul id="playlist-list" style="margin: 0; padding-left: 16px; list-style-type: disc;"></ul>
                             </div>
                         </div>
-                        <div id="test-results-subtab" class="subtab-panel" style="display: none;">
+                        <div id="test-results-subtab" class="subtab-panel">
                             <div class="list-scroll" style="overflow-y: auto;">
                                 <table id="test-results-table" class="file-table">
                                     <thead>
@@ -213,6 +219,29 @@
         <div id="wireless-modal" class="modal-overlay">
             <div class="modal-content"></div>
         </div>
+        <div id="export-options-modal" class="modal-overlay">
+            <div class="modal-content" style="top: 18%; left: 50%; transform: translateX(-50%); min-width: 520px;">
+                <span class="modal-close" onclick="closeExportOptions()">&times;</span>
+                <div id="export-options-heading" style="font-weight: bold; margin-bottom: 12px;">Save report</div>
+
+                <div style="display: flex; flex-direction: column; gap: 10px;">
+                    <label style="display: flex; flex-direction: column; gap: 4px;">
+                        <span>File name</span>
+                        <input id="export-filename" type="text" style="width: 100%;" />
+                    </label>
+                    <label style="display: flex; flex-direction: column; gap: 4px;">
+                        <span>Report title <span style="color:#888; font-weight:normal;">— heads every graph; the metric becomes the sub-title</span></span>
+                        <input id="export-title" type="text" style="width: 100%;" />
+                    </label>
+                </div>
+
+                <div style="margin-top: 16px; display: flex; gap: 8px; justify-content: flex-end;">
+                    <button type="button" class="cmp-pdf-btn" onclick="closeExportOptions()">Cancel</button>
+                    <button type="button" class="cmp-pdf-btn" onclick="confirmExportOptions()">Save</button>
+                </div>
+            </div>
+        </div>
+
         <div id="compare-picker-modal" class="modal-overlay">
             <div class="modal-content" style="top: 12%; left: 50%; transform: translateX(-50%); min-width: 520px;">
                 <span class="modal-close" onclick="closeComparePicker()">&times;</span>
